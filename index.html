@@ -15,8 +15,10 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1 (v0.3.2)
+     あるぞう Phase 1 (v0.3.3)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA(ローカル版)。
+     v0.3.3: 冷蔵庫タブの部門順を冷蔵→野菜室→冷凍に変更(実際の並びに合わせ、ピッカーのグループ順も同様に) /
+     .fridge-sectionの背景を完全透過にし、色付き枠線(border)のみで部門を区別するよう変更。
      v0.3.2: 追加シート下部stickyバーに個数タイプ用の数量ステッパーを追加 / 在庫カードをフラット化・詰めてemoji-tapを40px→29pxにし
      卵などを1行10個表示可能に / 冷蔵庫タブの部門見出しを色付き棚風コンテナ+アイコン(🧊❄️🥬)化 / 絵文字ピッカーの「冷蔵」から
      調味料を「調味料」グループへ分離、グループ見出しの ':xxx:' トークンを画像化(リュクサク見出しをカスタム絵文字画像に)。
@@ -152,12 +154,13 @@
   /* ── 冷蔵庫タブ専用: 部門セクションを棚/引き出し風に ── */
   .fridge-section{
     border-radius:14px; padding:10px 8px 12px; margin-bottom:14px;
+    background:transparent; border:2px solid transparent;
   }
   .fridge-section .item-list{ gap:4px; }
   .fridge-section .item-card{ border-bottom-color:rgba(90,60,30,.08); }
-  .fridge-section.dept-chilled{ background:#EAF4FB; }
-  .fridge-section.dept-frozen{ background:#E3F3FA; }
-  .fridge-section.dept-veggie{ background:#EEF6E4; }
+  .fridge-section.dept-chilled{ border-color:#A9D3EC; }
+  .fridge-section.dept-frozen{ border-color:#8FCBDC; }
+  .fridge-section.dept-veggie{ border-color:#B9D89A; }
   .fridge-section-title{
     display:flex; align-items:center; gap:6px;
     font-size:12.5px; font-weight:800; letter-spacing:1px;
@@ -376,7 +379,7 @@
 
   var CAT_LABELS = { fridge:"冷蔵庫", daily:"日用品", pet:"リュクサク" };
   var DEPTS = {
-    fridge: ["冷蔵", "冷凍", "野菜室"],
+    fridge: ["冷蔵", "野菜室", "冷凍"],
     daily:  ["洗面所", "風呂", "掃除", "洗濯", "その他"]
   };
 
@@ -485,8 +488,8 @@
     { label:"調味料", items:[
       "🍶","🧂","🍬","🥣","🫗",":mayo:",":shiokombu:","🍛","🌊"
     ] },
-    { label:"冷凍", items:["🍚","🍜"] },
     { label:"野菜室", items:["🧅","🥕","🥔","🥬","🍅","🥒","🍆","🫑","🥦","🍄","🍎","🍌","🍊"] },
+    { label:"冷凍", items:["🍚","🍜"] },
     { label:"🧴 日用品", items:["🧻","🧴","🧼","🪥","🧺","🧽"] },
     { label:":ryukusaku: リュクサク", items:["🥫","🦴"] },
     { label:"そのほか", items:["📦","🛒"] }
