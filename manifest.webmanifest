@@ -1,0 +1,15 @@
+{
+  "name": "あるぞう",
+  "short_name": "あるぞう",
+  "description": "冷蔵庫・日用品・ペットフードの在庫を絵文字で管理する共有アプリ",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFF8EF",
+  "theme_color": "#FFF8EF",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" }
+  ]
+}
