@@ -15,8 +15,11 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1 (v0.3.1)
+     あるぞう Phase 1 (v0.3.2)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA(ローカル版)。
+     v0.3.2: 追加シート下部stickyバーに個数タイプ用の数量ステッパーを追加 / 在庫カードをフラット化・詰めてemoji-tapを40px→29pxにし
+     卵などを1行10個表示可能に / 冷蔵庫タブの部門見出しを色付き棚風コンテナ+アイコン(🧊❄️🥬)化 / 絵文字ピッカーの「冷蔵」から
+     調味料を「調味料」グループへ分離、グループ見出しの ':xxx:' トークンを画像化(リュクサク見出しをカスタム絵文字画像に)。
      v0.3.1: タブバーのカスタム絵文字画像(:ryukusaku:等)を拡大表示(.ce-tab) / 追加シートに絵文字プレビュー+名前入力+追加ボタンの
      sticky下部バーを新設(絵文字ピッカー選択時にその場で名前が見える) / 全要素にtouch-action:manipulationを適用しダブルタップズームを防止。
      v0.3.0: よく買うものプリセットをstate化(favorites・追加/削除UI)/ プリセットタップのフィードバック(アニメ+トースト+在庫バッジ)/
@@ -101,49 +104,72 @@
     font-weight:700; font-size:14px; cursor:pointer;
   }
 
-  .section{ margin-bottom:20px; }
+  .section{ margin-bottom:16px; }
   .section-title{
     font-size:12.5px; font-weight:800; color:var(--main-dark);
-    margin-bottom:8px; padding-left:2px; letter-spacing:1px;
+    margin-bottom:6px; padding-left:2px; letter-spacing:1px;
   }
-  .item-list{ display:flex; flex-direction:column; gap:10px; }
+  .item-list{ display:flex; flex-direction:column; gap:4px; }
 
   .item-card{
-    background:var(--card); border-radius:16px; padding:12px 14px;
-    box-shadow:0 1px 3px rgba(90,60,30,.08);
+    padding:6px 0;
+    border-bottom:1px solid var(--border);
   }
+  .item-card:last-child{ border-bottom:none; }
   .item-card.flash{ animation:popScale .26s ease; }
   @keyframes popScale{ 0%{transform:scale(1);} 45%{transform:scale(1.035);} 100%{transform:scale(1);} }
 
   .item-head{
-    display:flex; align-items:center; gap:8px; cursor:pointer;
-    padding:2px 2px 8px; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; gap:6px; cursor:pointer;
+    padding:2px 2px 4px; min-height:32px; user-select:none; -webkit-user-select:none;
   }
-  .item-emoji-lead{ font-size:20px; }
-  .item-name{ font-size:15px; font-weight:700; color:var(--text); }
+  .item-emoji-lead{ font-size:18px; }
+  .item-name{ font-size:14px; font-weight:700; color:var(--text); }
 
-  .emoji-row{ display:flex; flex-wrap:wrap; gap:8px; }
+  .emoji-row{ display:flex; flex-wrap:wrap; gap:2px; }
   .emoji-tap{
-    width:40px; height:40px; min-height:40px; font-size:22px; border:none;
-    background:var(--section-bg); border-radius:10px; cursor:pointer;
+    width:29px; height:29px; min-height:29px; font-size:17px; border:none;
+    background:var(--section-bg); border-radius:8px; cursor:pointer;
     display:flex; align-items:center; justify-content:center;
     transition:transform .12s ease; padding:0;
   }
   .emoji-tap:active{ transform:scale(1.2); }
   .emoji-badge{
-    min-width:40px; height:40px; padding:0 10px; font-size:14px; font-weight:800;
-    color:#FFF; background:var(--main); border:none; border-radius:10px; cursor:pointer;
+    min-width:29px; height:29px; padding:0 8px; font-size:13px; font-weight:800;
+    color:#FFF; background:var(--main); border:none; border-radius:8px; cursor:pointer;
   }
   .emoji-badge:active{ transform:scale(1.1); }
 
   .gauge-row{
     width:100%; display:flex; align-items:center; justify-content:space-between;
-    background:var(--section-bg); border:none; border-radius:12px; padding:13px 14px;
-    cursor:pointer; font-family:inherit; min-height:44px;
+    background:var(--section-bg); border:none; border-radius:12px; padding:10px 14px;
+    cursor:pointer; font-family:inherit; min-height:40px;
   }
   .gauge-row:active{ transform:scale(1.015); }
   .gauge-dots{ font-size:18px; letter-spacing:5px; color:var(--main); }
   .gauge-label{ font-size:13px; font-weight:700; color:var(--sub2); }
+
+  /* ── 冷蔵庫タブ専用: 部門セクションを棚/引き出し風に ── */
+  .fridge-section{
+    border-radius:14px; padding:10px 8px 12px; margin-bottom:14px;
+  }
+  .fridge-section .item-list{ gap:4px; }
+  .fridge-section .item-card{ border-bottom-color:rgba(90,60,30,.08); }
+  .fridge-section.dept-chilled{ background:#EAF4FB; }
+  .fridge-section.dept-frozen{ background:#E3F3FA; }
+  .fridge-section.dept-veggie{ background:#EEF6E4; }
+  .fridge-section-title{
+    display:flex; align-items:center; gap:6px;
+    font-size:12.5px; font-weight:800; letter-spacing:1px;
+    margin-bottom:8px; padding-left:2px;
+  }
+  .fridge-section-title .handle{
+    display:inline-block; width:22px; height:5px; border-radius:3px;
+    background:rgba(0,0,0,.14);
+  }
+  .fridge-section.dept-chilled .fridge-section-title{ color:#3E7CA6; }
+  .fridge-section.dept-frozen .fridge-section-title{ color:#2E8FA8; }
+  .fridge-section.dept-veggie .fridge-section-title{ color:#5C8A3A; }
 
   .empty-state{ text-align:center; padding:60px 16px 20px; }
   .empty-emoji{ font-size:58px; margin-bottom:10px; }
@@ -200,7 +226,7 @@
   /* ── 追加シート下部固定バー(絵文字プレビュー+名前+追加) ── */
   .add-sticky-bar{
     position:sticky; bottom:0; left:0; right:0; z-index:5;
-    display:flex; align-items:center; gap:10px;
+    display:flex; align-items:center; gap:6px;
     padding:10px 18px calc(10px + env(safe-area-inset-bottom));
     background:var(--bg); border-top:1px solid var(--border);
   }
@@ -208,8 +234,14 @@
     flex:none; width:38px; height:38px; display:flex; align-items:center; justify-content:center;
     font-size:28px; border-radius:10px; background:var(--section-bg);
   }
-  .add-sticky-name{ flex:1; width:auto; }
-  .add-sticky-bar .btn-primary{ flex:none; padding:11px 18px; white-space:nowrap; }
+  .add-sticky-name{ flex:1; width:auto; min-width:0; }
+  .add-sticky-bar .btn-primary{ flex:none; padding:11px 14px; white-space:nowrap; }
+  .sticky-stepper{ flex:none; display:flex; align-items:center; gap:2px; }
+  .sticky-stepper-btn{
+    width:38px; height:38px; min-width:38px; border-radius:9px; border:1px solid var(--border);
+    background:#FFF; font-size:16px; font-weight:800; color:var(--main-dark); cursor:pointer; padding:0;
+  }
+  .sticky-stepper-val{ font-size:13px; font-weight:800; min-width:18px; text-align:center; }
 
   .favorites-header{ display:flex; align-items:center; justify-content:space-between; }
   .favorites-header .sheet-label{ margin-top:0; }
@@ -348,6 +380,13 @@
     daily:  ["洗面所", "風呂", "掃除", "洗濯", "その他"]
   };
 
+  // 冷蔵庫タブの部門ごとの装飾(棚/引き出し風コンテナのクラスと見出しアイコン)
+  var FRIDGE_DEPT_DECOR = {
+    "冷蔵": { cls:"dept-chilled", icon:"🧊" },
+    "冷凍": { cls:"dept-frozen", icon:"❄️" },
+    "野菜室": { cls:"dept-veggie", icon:"🥬" }
+  };
+
   // よく買うものの既定プリセット(タブごと)。実際の「よく買うもの」は state (S.data.favorites) が正で、
   // 初回起動時にこのPRESETSをコピーして初期化する(migrateFavorites参照)。以後PRESETSは初期値の参照専用。
   var PRESETS = {
@@ -441,12 +480,15 @@
   var EMOJI_GROUPS = [
     { label:"冷蔵", items:[
       "🥚","🥛","🐷","🐔","🐮","🍖","🌭","🥓","🐟","🍥","🫘",":natto:",":tofu:",
-      "🧀","🧈","🍞","🍶","🧂","🍬","🥣","🫗",":mayo:",":shiokombu:","🍛","🌊"
+      "🧀","🧈","🍞"
+    ] },
+    { label:"調味料", items:[
+      "🍶","🧂","🍬","🥣","🫗",":mayo:",":shiokombu:","🍛","🌊"
     ] },
     { label:"冷凍", items:["🍚","🍜"] },
     { label:"野菜室", items:["🧅","🥕","🥔","🥬","🍅","🥒","🍆","🫑","🥦","🍄","🍎","🍌","🍊"] },
     { label:"🧴 日用品", items:["🧻","🧴","🧼","🪥","🧺","🧽"] },
-    { label:"🐱 リュクサク", items:["🥫","🦴"] },
+    { label:":ryukusaku: リュクサク", items:["🥫","🦴"] },
     { label:"そのほか", items:["📦","🛒"] }
   ];
 
@@ -489,6 +531,13 @@
     }
     return esc(key);
   }
+  // ジャンル見出しラベルを描画する。ラベル中の ':xxx:' 形式トークンはCUSTOM_EMOJIに登録があれば
+  // 画像に置換する(例: ":ryukusaku: リュクサク" → 🐱画像 + " リュクサク")。無ければそのまま表示。
+  function renderGroupLabelHtml(label){
+    return esc(label).replace(/:[a-z0-9_]+:/gi, function(token){
+      return CUSTOM_EMOJI[token] ? emojiHTML(token, 'ce-20') : token;
+    });
+  }
   // 絵文字ピッカーをジャンル見出し付きグリッドで描画する共通ヘルパー(追加・編集シート共通)。
   function renderEmojiGroupsHtml(selectedEmoji, action){
     return EMOJI_GROUPS.map(function(g){
@@ -496,7 +545,7 @@
         var sel = selectedEmoji === em ? ' selected' : '';
         return '<button class="emoji-choice' + sel + '" data-action="' + action + '" data-emoji="' + esc(em) + '">' + emojiHTML(em, 'ce-20') + '</button>';
       }).join('');
-      return '<div class="emoji-group-label">' + esc(g.label) + '</div><div class="emoji-grid">' + grid + '</div>';
+      return '<div class="emoji-group-label">' + renderGroupLabelHtml(g.label) + '</div><div class="emoji-grid">' + grid + '</div>';
     }).join('');
   }
 
@@ -925,7 +974,7 @@
       var shown = Math.min(qty, 10);
       var btns = "";
       for (var i = 0; i < shown; i++){
-        btns += '<button class="emoji-tap" data-action="consume-item" data-id="' + it.id + '">' + emojiHTML(it.emoji, 'ce-22') + '</button>';
+        btns += '<button class="emoji-tap" data-action="consume-item" data-id="' + it.id + '">' + emojiHTML(it.emoji, 'ce-18') + '</button>';
       }
       var overflow = qty > 10 ? '<button class="emoji-badge" data-action="consume-item" data-id="' + it.id + '">×' + qty + '</button>' : "";
       body = '<div class="emoji-row">' + btns + overflow + '</div>';
@@ -985,6 +1034,17 @@
     var sections = "";
     if (cat === "pet") {
       sections = '<div class="section"><div class="item-list">' + items.map(renderItemRow).join('') + '</div></div>';
+    } else if (cat === "fridge") {
+      // 冷蔵庫タブは部門ごとに色付きの棚/引き出し風コンテナで包む(FRIDGE_DEPT_DECOR参照)
+      DEPTS[cat].forEach(function(dept){
+        var list = items.filter(function(it){ return it.dept === dept; });
+        if (!list.length) return;
+        var decor = FRIDGE_DEPT_DECOR[dept] || { cls:"", icon:"" };
+        sections += '<div class="section fridge-section ' + decor.cls + '">' +
+          '<div class="fridge-section-title"><span>' + decor.icon + ' ' + esc(dept) + '</span><span class="handle"></span></div>' +
+          '<div class="item-list">' + list.map(renderItemRow).join('') + '</div>' +
+        '</div>';
+      });
     } else {
       DEPTS[cat].forEach(function(dept){
         var list = items.filter(function(it){ return it.dept === dept; });
@@ -1129,6 +1189,13 @@
         '<div class="add-sticky-bar">' +
           '<span class="add-sticky-emoji">' + emojiHTML(f.emoji, 'ce-32') + '</span>' +
           '<input class="field add-sticky-name" type="text" placeholder="名前" data-field="add-name" value="' + esc(f.name) + '">' +
+          (f.type === "count"
+            ? '<div class="sticky-stepper">' +
+                '<button class="sticky-stepper-btn" data-action="add-qty-delta" data-delta="-1">−</button>' +
+                '<span class="sticky-stepper-val">' + f.qty + '</span>' +
+                '<button class="sticky-stepper-btn" data-action="add-qty-delta" data-delta="1">＋</button>' +
+              '</div>'
+            : '') +
           '<button class="btn-primary" data-action="add-submit">追加</button>' +
         '</div>' +
       '</div>';
