@@ -15,8 +15,14 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1 (v0.3.3)
+     あるぞう Phase 1〜3 (v0.4.0)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA(ローカル版)。
+     v0.4.0: Phase 3「レシート取り込み」機能を追加。写真アプリのLive Text(長押し→テキスト選択→コピー)で
+     得たレシートの生テキストを貼り付けると、parseReceipt()が商品行/金額行/数量注記(@139✕2個等)/割引・
+     レジ袋・合計以降を判別して商品候補を抽出し、guessItemFor()が学習辞書(receiptDict、レーベンシュタイン
+     あいまい一致対応)→既存在庫→内蔵食材辞書(FOOD_DICT)の順で在庫アイテムを推定する。買い物リストタブに
+     「🧾レシート取り込み」ボタンを新設、候補ごとにON/OFF・名前・絵文字・タイプ・部門を編集して確定すると
+     在庫へ加算(個数は加算・残量はたっぷりに)、買い物リストの同名は消し込み、選択内容をreceiptDictへ学習する。
      v0.3.3: 冷蔵庫タブの部門順を冷蔵→野菜室→冷凍に変更(実際の並びに合わせ、ピッカーのグループ順も同様に) /
      .fridge-sectionの背景を完全透過にし、色付き枠線(border)のみで部門を区別するよう変更。
      v0.3.2: 追加シート下部stickyバーに個数タイプ用の数量ステッパーを追加 / 在庫カードをフラット化・詰めてemoji-tapを40px→29pxにし
@@ -37,7 +43,8 @@
                      dept: 冷蔵庫='冷蔵'|'冷凍'|'野菜室' / 日用品='洗面所'|'風呂'|'掃除'|'洗濯'|'その他' / ペット=null,
                      addedAt }],
        shopping: [{ id, name, emoji, checked, cat, dept, addedAt }],
-       dict:     { <名前>: {emoji, type, cat, dept} }  // 学習辞書
+       dict:     { <名前>: {emoji, type, cat, dept} },  // 学習辞書
+       receiptDict: { <正規化キー>: {name,emoji,type,cat,dept} または {ignore:true} } // レシート取り込みの学習辞書
      }
 
      素のJS・単一HTML・ビルド無し・CDN無し・外部通信ゼロ。
@@ -364,6 +371,48 @@
     color:var(--sub2); font-size:14px; cursor:pointer; flex:none;
   }
   .shopping-actions{ display:flex; gap:10px; margin-top:18px; }
+
+  /* ── レシート取り込み(Phase 3) ── */
+  .receipt-btn{
+    width:100%; padding:12px 0; margin-bottom:14px; border-radius:14px;
+    border:1px dashed var(--border-strong); background:#FFF9F0; color:var(--main-dark);
+    font-weight:700; font-size:14px; cursor:pointer;
+  }
+  .receipt-hint{ font-size:12.5px; color:var(--sub2); line-height:1.5; }
+  .receipt-textarea{ min-height:140px; resize:vertical; line-height:1.5; }
+  .receipt-summary{ font-size:14px; font-weight:800; color:var(--main-dark); }
+  .receipt-date{ font-size:12px; color:var(--sub2); margin-bottom:4px; }
+  .receipt-cand{
+    border:1px solid var(--border); border-radius:14px; padding:10px 12px;
+    margin-bottom:10px; background:#FFF;
+  }
+  .receipt-cand.is-new{ border-color:var(--accent); background:#FFFBF0; }
+  .receipt-cand.off{ opacity:.45; }
+  .receipt-cand-top{ display:flex; align-items:center; gap:8px; }
+  .receipt-cand-raw{ font-size:11px; color:var(--sub); margin:2px 0 6px 34px; }
+  .receipt-cand-new-badge{
+    font-size:10px; font-weight:800; color:var(--main-dark); background:var(--section-bg);
+    border-radius:6px; padding:2px 6px; flex:none;
+  }
+  .receipt-toggle{
+    width:26px; height:26px; border-radius:8px; border:2px solid var(--border-strong);
+    background:#FFF; display:flex; align-items:center; justify-content:center;
+    font-size:14px; font-weight:800; color:#FFF; flex:none; cursor:pointer; padding:0;
+  }
+  .receipt-toggle.on{ background:var(--main); border-color:var(--main); }
+  .receipt-cand-emoji-btn{
+    width:34px; height:34px; border-radius:9px; background:var(--section-bg); border:none;
+    font-size:20px; display:flex; align-items:center; justify-content:center; flex:none; cursor:pointer; padding:0;
+  }
+  .receipt-cand-name{ flex:1; min-width:0; padding:8px 10px; font-size:14.5px; }
+  .receipt-cand-row{ display:flex; align-items:center; gap:8px; margin-top:8px; }
+  .receipt-cand-stepper{ display:flex; align-items:center; gap:6px; }
+  .receipt-mini-select{ flex:1; padding:8px 6px; font-size:12.5px; }
+  .receipt-ignore-btn{
+    font-size:11px; color:var(--sub2); background:none; border:none;
+    text-decoration:underline; cursor:pointer; padding:4px 2px;
+  }
+  .segmented.receipt-seg .seg-btn{ padding:8px 0; font-size:12.5px; min-height:36px; }
 </style>
 </head>
 <body>
@@ -437,6 +486,7 @@
     "なす":{emoji:"🍆",type:"count",dept:"野菜室"}, "ナス":{emoji:"🍆",type:"count",dept:"野菜室"},
     "ピーマン":{emoji:"🫑",type:"count",dept:"野菜室"},
     "ブロッコリー":{emoji:"🥦",type:"count",dept:"野菜室"},
+    "アボカド":{emoji:"🥑",type:"count",dept:"野菜室"},
     "きのこ":{emoji:"🍄",type:"count",dept:"野菜室"},
     "豚肉":{emoji:"🐷",type:"count",dept:"冷蔵"}, "豚こま":{emoji:"🐷",type:"count",dept:"冷蔵"},
     "鶏肉":{emoji:"🐔",type:"count",dept:"冷蔵"}, "鶏むね":{emoji:"🐔",type:"count",dept:"冷蔵"}, "鶏もも":{emoji:"🐔",type:"count",dept:"冷蔵"},
@@ -488,7 +538,7 @@
     { label:"調味料", items:[
       "🍶","🧂","🍬","🥣","🫗",":mayo:",":shiokombu:","🍛","🌊"
     ] },
-    { label:"野菜室", items:["🧅","🥕","🥔","🥬","🍅","🥒","🍆","🫑","🥦","🍄","🍎","🍌","🍊"] },
+    { label:"野菜室", items:["🧅","🥕","🥔","🥬","🍅","🥒","🍆","🫑","🥦","🍄","🥑","🍎","🍌","🍊"] },
     { label:"冷凍", items:["🍚","🍜"] },
     { label:"🧴 日用品", items:["🧻","🧴","🧼","🪥","🧺","🧽"] },
     { label:":ryukusaku: リュクサク", items:["🥫","🦴"] },
@@ -502,6 +552,7 @@
     "🍅":"トマト", "🥒":"きゅうり", "🍆":"なす", "🫑":"ピーマン", "🥦":"ブロッコリー", "🍄":"きのこ",
     "🐷":"豚こま", "🐔":"鶏むね", "🐮":"牛肉", "🍖":"ひき肉", "🌭":"ウインナー", "🥓":"ベーコン",
     "🐟":"魚", "🧀":"チーズ", "🧈":"バター", "🍞":"食パン", "🍚":"ごはん", "🍜":"冷凍うどん",
+    "🥑":"アボカド",
     "🍎":"りんご", "🍌":"バナナ", "🍊":"みかん", "🍶":"醤油", "🧂":"塩", "🍬":"砂糖", "🥣":"味噌",
     "🫗":"油", "🍛":"カレールー",
     ":mayo:":"マヨネーズ", ":natto:":"納豆", ":tofu:":"豆腐", ":shiokombu:":"塩昆布",
@@ -509,6 +560,22 @@
     "🧺":"洗濯洗剤", "🧽":"食器用洗剤",
     "🥫":"ドライフード", "🦴":"おやつ"
   };
+
+  // レシート取り込み(Phase 3)用の判定パターン。
+  // 割引/値引は行自体と直後の金額行の両方を捨て、レジ袋はその行だけ捨てる。
+  // 小計以降のキーワードが出た行以降は完全に無視する(打ち切り)。
+  var RECEIPT_DISCOUNT_WORDS = ["★割引", "値引"];
+  var RECEIPT_SKIP_WORDS = ["レジ袋"];
+  var RECEIPT_CUTOFF_WORDS = ["小計", "合計", "お買上", "PayPay", "楽天ペイ", "※印は", "領収証", "登録番号"];
+  // 金額のみの行(¥・-・·付きや末尾※・内も許容)
+  var RECEIPT_MONEY_RE = /^[¥￥\-·−]?[\d,]+\s*(?:内)?\s*[※]?$/;
+  // 商品名先頭の商品コード(2〜4桁)
+  var RECEIPT_CODE_RE = /^\d{2,4}\s*/;
+  // 数量注記(例: （@139✕2個） (@99 x 3個))。全角/半角の括弧・✕×xX・空白の揺れを許容
+  var RECEIPT_QTY_RE = /^[（(]\s*@?\s*[\d,]+\s*[✕×xX]\s*(\d+)\s*個\s*[）)]\s*$/;
+  // 商品名+金額が同じ行にあるパターン(例: ソフティモ2倍W12R ¥690内)
+  var RECEIPT_COMBINED_RE = /^(.+?)\s*[¥￥]\s*([\d,]+)\s*(?:内|※)?\s*$/;
+  var RECEIPT_DATE_RE = /\d{4}年\d{1,2}月\d{1,2}日/;
 
   // ─────────────────────────────────────────
   // ユーティリティ
@@ -564,6 +631,7 @@
     if (!Array.isArray(d.items)) d.items = [];
     if (!Array.isArray(d.shopping)) d.shopping = [];
     if (!d.dict || typeof d.dict !== "object") d.dict = {};
+    if (!d.receiptDict || typeof d.receiptDict !== "object") d.receiptDict = {};
     if (!d.favorites || typeof d.favorites !== "object") d.favorites = {};
     // 「よく買うもの」はPRESETSを初期値としてstate化している。無ければ既定値をコピーして初期化する(1回きり)。
     ["fridge", "daily", "pet"].forEach(function(cat){
@@ -624,6 +692,12 @@
     flashId: null,   // 直近タップしたアイテムidにポップアニメーションを付ける
     presetFlashKey: null,     // 直近タップしたプリセット(cat+"|"+name)にポップアニメーションを付ける
     favoritesEditMode: false, // よく買うものグリッドの編集(削除)モード
+    receiptOpen: false,       // レシート取り込みシートの開閉
+    receiptStep: "paste",     // paste(貼り付け) | candidates(候補リスト)
+    receiptText: "",          // 貼り付けた生テキスト
+    receiptParsed: null,      // parseReceipt()の結果 {date, items}
+    receiptCandidates: [],    // 候補配列(編集可能な状態を持つ)
+    receiptEmojiOpenIdx: null,// 絵文字ピッカーを開いている候補のインデックス(1つのみ)
   };
   var undoSnapshot = null; // 直前の1操作分のデータスナップショット(JSON文字列)
   var toastTimer = null;
@@ -952,16 +1026,231 @@
   }
 
   // ─────────────────────────────────────────
+  // レシート取り込み(Phase 3): パーサ・推定・状態操作
+  // ─────────────────────────────────────────
+  // 金額表記の文字列("¥1,234※"等)から数値を取り出す
+  function parseReceiptMoney(s){
+    return parseInt(String(s).replace(/[¥￥,※\-·−]/g, ""), 10) || 0;
+  }
+
+  // レシートのLive Text生テキストを商品候補配列にパースする。
+  // 戻り値: { date:"2026年07月27日"(無ければ""), items:[{raw, qty, price}] }
+  //
+  // 行の判定順序(1行ずつ):
+  //   1) 割引/値引を含む行 → その行と直後の金額行を両方捨てる
+  //   2) レジ袋を含む行 → その行だけ捨てる
+  //   3) 小計/合計等のキーワードを含む行 → 以降は完全に無視(打ち切り)
+  //   4) 数量注記((@139✕2個)等) → 直前に確定した商品のqtyへ反映
+  //   5) 金額のみの行 → 価格待ちの商品(pending)があれば確定する
+  //   6) 商品名+金額が同じ行(ソフティモ2倍W12R ¥690内 等) → その場で確定
+  //   7) それ以外 → 先頭の商品コードを除去して次の価格待ち商品(pending)にする
+  //      (前のpendingが価格未確定のまま次の商品名行が来た場合は破棄する。
+  //       ヘッダ(maruetsu等)が商品部の途中に紛れても、価格が付かない限り候補に残らない)
+  function parseReceipt(text){
+    var lines = String(text || "").split("\n");
+    var items = [];
+    var pending = null;       // { raw } 価格待ちの商品
+    var lastConfirmed = null; // 直前に確定した商品(items内の要素参照。数量注記の反映先)
+
+    function confirm(raw, price){
+      var it = { raw: raw, qty: 1, price: price };
+      items.push(it);
+      lastConfirmed = it;
+      pending = null;
+    }
+
+    for (var i = 0; i < lines.length; i++){
+      var line = lines[i].trim();
+      if (!line) continue;
+
+      if (RECEIPT_DISCOUNT_WORDS.some(function(w){ return line.indexOf(w) !== -1; })) {
+        var next = (lines[i + 1] || "").trim();
+        if (RECEIPT_MONEY_RE.test(next)) i++; // 直後の金額行も一緒に消費して捨てる
+        pending = null;
+        continue;
+      }
+      if (RECEIPT_SKIP_WORDS.some(function(w){ return line.indexOf(w) !== -1; })) continue;
+
+      if (RECEIPT_CUTOFF_WORDS.some(function(w){ return line.indexOf(w) !== -1; })) break;
+
+      var qtyMatch = line.match(RECEIPT_QTY_RE);
+      if (qtyMatch) {
+        if (lastConfirmed) lastConfirmed.qty = parseInt(qtyMatch[1], 10) || lastConfirmed.qty;
+        continue;
+      }
+
+      if (RECEIPT_MONEY_RE.test(line)) {
+        if (pending) confirm(pending.raw, parseReceiptMoney(line));
+        continue; // pendingが無い金額行(はぐれた数量等)は捨てる
+      }
+
+      var combo = line.match(RECEIPT_COMBINED_RE);
+      if (combo) {
+        var comboName = combo[1].trim().replace(RECEIPT_CODE_RE, "").trim();
+        if (comboName) confirm(comboName, parseReceiptMoney(combo[2]));
+        continue;
+      }
+
+      var name = line.replace(RECEIPT_CODE_RE, "").trim();
+      if (!name) continue; // コード除去後に残りが空 → 商品行として扱わない
+      pending = { raw: name };
+    }
+
+    var dateMatch = String(text || "").match(RECEIPT_DATE_RE);
+    return { date: dateMatch ? dateMatch[0] : "", items: items };
+  }
+
+  // レーベンシュタイン距離(素直なDP)
+  function levenshtein(a, b){
+    var m = a.length, n = b.length;
+    var dp = [];
+    for (var i = 0; i <= m; i++){ dp.push([i]); }
+    for (var j = 0; j <= n; j++){ dp[0][j] = j; }
+    for (i = 1; i <= m; i++){
+      for (j = 1; j <= n; j++){
+        dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+    return dp[m][n];
+  }
+
+  // レシート表記の学習辞書キー用に正規化する(商品コード除去・空白除去・全角英数の半角化程度)
+  function normalizeReceiptKey(raw){
+    return String(raw || "")
+      .replace(/^\d{2,4}\s*/, "")
+      .replace(/\s+/g, "")
+      .replace(/[Ａ-Ｚａ-ｚ０-９]/g, function(c){ return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); });
+  }
+
+  // レシート表記(raw)から在庫アイテムを推定する。優先順位:
+  // 1) 学習辞書(receiptDict)の完全一致 → 2) 学習辞書のあいまい一致(レーベンシュタイン距離2以下かつ
+  // 文字数の30%以内) → 3) 既存の在庫アイテム名との包含判定 → 4) 内蔵の食材辞書(FOOD_DICT)との包含判定
+  // → 5) 未知(null)。戻り値は {name,emoji,type,cat,dept} または {ignore:true} または null。
+  function guessItemFor(raw){
+    var key = normalizeReceiptKey(raw);
+    var dict = S.data.receiptDict || {};
+    if (Object.prototype.hasOwnProperty.call(dict, key)) return dict[key];
+
+    var bestKey = null, bestDist = Infinity;
+    Object.keys(dict).forEach(function(k){
+      var d = levenshtein(key, k);
+      var limit = Math.max(key.length, k.length) * 0.3;
+      if (d <= 2 && d <= limit && d < bestDist) { bestDist = d; bestKey = k; }
+    });
+    if (bestKey) return dict[bestKey];
+
+    // 包含判定は1文字キー("塩""魚""油"等)だと誤爆しやすいので2文字未満は対象から除く
+    var invMatch = null;
+    S.data.items.some(function(it){
+      if (!it.name || it.name.length < 2) return false;
+      if (key.indexOf(it.name) !== -1 || (key.length >= 2 && it.name.indexOf(key) !== -1)) { invMatch = it; return true; }
+      return false;
+    });
+    if (invMatch) return { name: invMatch.name, emoji: invMatch.emoji, type: invMatch.type, cat: invMatch.cat, dept: invMatch.dept };
+
+    var foodMatch = null;
+    Object.keys(FOOD_DICT).some(function(k){
+      if (k.length < 2) return false;
+      if (key.indexOf(k) !== -1 || (key.length >= 2 && k.indexOf(key) !== -1)) { foodMatch = k; return true; }
+      return false;
+    });
+    if (foodMatch) {
+      var fd = FOOD_DICT[foodMatch];
+      return { name: foodMatch, emoji: fd.emoji, type: fd.type, cat: "fridge", dept: fd.dept };
+    }
+
+    return null; // 未知
+  }
+
+  function openReceiptSheet(){
+    S.receiptOpen = true;
+    S.receiptStep = "paste";
+    S.receiptText = "";
+    S.receiptParsed = null;
+    S.receiptCandidates = [];
+    S.receiptEmojiOpenIdx = null;
+    S.addOpen = false;
+    S.editingId = null;
+    render();
+  }
+  function closeReceiptSheet(){
+    S.receiptOpen = false;
+    S.receiptStep = "paste";
+    S.receiptText = "";
+    S.receiptParsed = null;
+    S.receiptCandidates = [];
+    S.receiptEmojiOpenIdx = null;
+    render();
+  }
+
+  // 貼り付けたテキストをパースして候補リストを組み立てる
+  function parseReceiptText(){
+    var text = S.receiptText || "";
+    if (!text.trim()) return;
+    var parsed = parseReceipt(text);
+    var cands = parsed.items.map(function(it){
+      var guess = guessItemFor(it.raw);
+      if (guess && guess.ignore) return null; // 「今後も無視」済みは候補に出さない
+      var cat = (guess && guess.cat) || "fridge";
+      var dept = (guess && guess.dept) || (cat === "pet" ? null : DEPTS[cat][0]);
+      var type = (guess && guess.type) || "count";
+      return {
+        raw: it.raw,
+        on: true,
+        name: (guess && guess.name) || it.raw,
+        emoji: (guess && guess.emoji) || defaultEmojiForCat(cat),
+        type: type,
+        qty: it.qty || 1,
+        gauge: 3,
+        cat: cat,
+        dept: dept,
+        isNew: !guess
+      };
+    }).filter(function(c){ return c; });
+    S.receiptParsed = parsed;
+    S.receiptCandidates = cands;
+    S.receiptStep = "candidates";
+    render();
+  }
+
+  // ONの候補だけを在庫へ確定する
+  function submitReceiptCandidates(){
+    var cands = (S.receiptCandidates || []).filter(function(c){ return c.on; });
+    if (!cands.length) { closeReceiptSheet(); return; }
+    pushUndo();
+    var count = 0;
+    cands.forEach(function(c){
+      var name = (c.name || "").trim();
+      if (!name) return;
+      var emoji = (c.emoji || "").trim() || defaultEmojiForCat(c.cat);
+      var dept = c.cat === "pet" ? null : c.dept;
+      // 個数ものはqty回upsertして加算、残量ものは1回でたっぷり(3)に戻す
+      var times = c.type === "count" ? Math.max(1, Number(c.qty) || 1) : 1;
+      for (var i = 0; i < times; i++){ upsertItem(c.cat, name, emoji, c.type, dept); }
+      // 買い物リストの同名は消し込む
+      S.data.shopping = S.data.shopping.filter(function(s){ return !(s.name === name && s.cat === c.cat); });
+      // 学習辞書へ記録
+      S.data.receiptDict[normalizeReceiptKey(c.raw)] = { name: name, emoji: emoji, type: c.type, cat: c.cat, dept: dept };
+      count++;
+    });
+    persist(S.data);
+    closeReceiptSheet();
+    showToast(count + "個いれたぞう", [{ label:"もどす", action:"toast-undo" }], 4000);
+  }
+
+  // ─────────────────────────────────────────
   // 描画: 小物
   // ─────────────────────────────────────────
   function emptyStateHtml(msg){
     return '<div class="empty-state"><div class="empty-emoji">🐘</div><div class="empty-msg">' + esc(msg) + '</div></div>';
   }
 
-  function gaugeSelectorHtml(action, current){
+  // idxを渡すと data-idx 属性を付ける(レシート候補など、配列インデックスで対象を特定する場合用)
+  function gaugeSelectorHtml(action, current, idx){
     var levels = [{v:3,l:"たっぷり"},{v:2,l:"半分"},{v:1,l:"少ない"},{v:0,l:"なし"}];
     return '<div class="gauge-select">' + levels.map(function(lv){
-      return '<button class="gauge-opt' + (current === lv.v ? ' active' : '') + '" data-action="' + action + '" data-g="' + lv.v + '">' + lv.l + '</button>';
+      return '<button class="gauge-opt' + (current === lv.v ? ' active' : '') + '" data-action="' + action + '"' +
+        (idx != null ? ' data-idx="' + idx + '"' : '') + ' data-g="' + lv.v + '">' + lv.l + '</button>';
     }).join('') + '</div>';
   }
 
@@ -1072,13 +1361,14 @@
 
   function renderShoppingTab(){
     var list = S.data.shopping;
+    var receiptBtn = '<button class="receipt-btn" data-action="receipt-open">🧾 レシート取り込み</button>';
     var inputRow = '<div class="shopping-add-row">' +
       '<input class="field" type="text" placeholder="かうものの名前" data-field="shopping-input" value="' + esc(S.shoppingInput || '') + '">' +
       '<button class="add-btn small" data-action="shopping-add">＋</button>' +
     '</div>';
 
     if (!list.length) {
-      return '<div class="tab-body">' + inputRow + emptyStateHtml("かうものはないぞう！") + '</div>';
+      return '<div class="tab-body">' + receiptBtn + inputRow + emptyStateHtml("かうものはないぞう！") + '</div>';
     }
 
     function groupKey(cat, dept){ return (cat || "none") + "|" + (dept || "none"); }
@@ -1119,7 +1409,7 @@
       '<button class="btn-primary" data-action="shopping-move-to-stock"' + (hasChecked ? '' : ' disabled') + '>チェック済みを在庫に入れる</button>' +
     '</div>';
 
-    return '<div class="tab-body">' + inputRow + sections + actions + '</div>';
+    return '<div class="tab-body">' + receiptBtn + inputRow + sections + actions + '</div>';
   }
 
   // ─────────────────────────────────────────
@@ -1250,6 +1540,91 @@
   }
 
   // ─────────────────────────────────────────
+  // 描画: レシート取り込みシート(Phase 3)
+  // ─────────────────────────────────────────
+  // 候補1件分のカードを描画する。絵文字ピッカーはS.receiptEmojiOpenIdxで開閉するアコーディオン方式
+  function renderReceiptCandidateHtml(c, idx){
+    var pickerOpen = S.receiptEmojiOpenIdx === idx;
+    var typeSeg = '<div class="segmented receipt-seg">' +
+        '<button class="seg-btn' + (c.type === "count" ? ' active' : '') + '" data-action="rc-set-type" data-idx="' + idx + '" data-type="count">個数</button>' +
+        '<button class="seg-btn' + (c.type === "gauge" ? ' active' : '') + '" data-action="rc-set-type" data-idx="' + idx + '" data-type="gauge">残量</button>' +
+      '</div>';
+    var qtyOrGauge = c.type === "count"
+      ? '<div class="receipt-cand-stepper">' +
+          '<button class="sticky-stepper-btn" data-action="rc-qty-delta" data-idx="' + idx + '" data-delta="-1">−</button>' +
+          '<span class="sticky-stepper-val">' + c.qty + '</span>' +
+          '<button class="sticky-stepper-btn" data-action="rc-qty-delta" data-idx="' + idx + '" data-delta="1">＋</button>' +
+        '</div>'
+      : gaugeSelectorHtml("rc-set-gauge", c.gauge != null ? c.gauge : 3, idx);
+    var catOptions = ["fridge", "daily", "pet"].map(function(cc){
+      return '<option value="' + cc + '"' + (c.cat === cc ? ' selected' : '') + '>' + esc(CAT_LABELS[cc]) + '</option>';
+    }).join('');
+    var deptField = "";
+    if (c.cat !== "pet") {
+      var deptOptions = DEPTS[c.cat].map(function(d){
+        return '<option value="' + esc(d) + '"' + (c.dept === d ? ' selected' : '') + '>' + esc(d) + '</option>';
+      }).join('');
+      deptField = '<select class="field receipt-mini-select" data-field="rc-dept" data-idx="' + idx + '">' + deptOptions + '</select>';
+    }
+    return '' +
+      '<div class="receipt-cand' + (c.isNew ? ' is-new' : '') + (c.on ? '' : ' off') + '">' +
+        '<div class="receipt-cand-top">' +
+          '<button class="receipt-toggle' + (c.on ? ' on' : '') + '" data-action="rc-toggle-on" data-idx="' + idx + '">' + (c.on ? '✓' : '') + '</button>' +
+          '<button class="receipt-cand-emoji-btn" data-action="rc-toggle-emoji" data-idx="' + idx + '">' + emojiHTML(c.emoji, 'ce-22') + '</button>' +
+          '<input class="field receipt-cand-name" type="text" data-field="rc-name" data-idx="' + idx + '" value="' + esc(c.name) + '">' +
+          (c.isNew ? '<span class="receipt-cand-new-badge">はじめて</span>' : '') +
+        '</div>' +
+        '<div class="receipt-cand-raw">' + esc(c.raw) + '</div>' +
+        (pickerOpen ? renderEmojiGroupsHtml(c.emoji, "rc-set-emoji") : '') +
+        '<div class="receipt-cand-row">' + typeSeg + '</div>' +
+        '<div class="receipt-cand-row">' + qtyOrGauge + '</div>' +
+        '<div class="receipt-cand-row">' +
+          '<select class="field receipt-mini-select" data-field="rc-cat" data-idx="' + idx + '">' + catOptions + '</select>' +
+          deptField +
+        '</div>' +
+        '<div class="receipt-cand-row">' +
+          '<button class="receipt-ignore-btn" data-action="rc-ignore" data-idx="' + idx + '">今後も無視</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  function renderReceiptSheet(){
+    if (S.receiptStep === "paste") {
+      return '' +
+        '<div class="sheet-backdrop" data-action="receipt-close"></div>' +
+        '<div class="sheet">' +
+          '<div class="sheet-head"><span>🧾 レシート取り込み</span><button class="sheet-close" data-action="receipt-close">×</button></div>' +
+          '<div class="sheet-body">' +
+            '<div class="receipt-hint">写真アプリでレシートを長押し→テキストを選択→コピーして、ここに貼り付けてね</div>' +
+            '<textarea class="field receipt-textarea" placeholder="レシートの文字をここに貼り付けるぞう" data-field="receipt-text">' + esc(S.receiptText || '') + '</textarea>' +
+          '</div>' +
+          '<div class="sheet-actions">' +
+            '<button class="btn-primary" data-action="receipt-parse">よみとるぞう</button>' +
+          '</div>' +
+        '</div>';
+    }
+    var cands = S.receiptCandidates || [];
+    var dateLine = (S.receiptParsed && S.receiptParsed.date) ? ('<div class="receipt-date">' + esc(S.receiptParsed.date) + '</div>') : '';
+    var listHtml = cands.length
+      ? cands.map(function(c, idx){ return renderReceiptCandidateHtml(c, idx); }).join('')
+      : emptyStateHtml("商品が見つからなかったぞう…");
+    var onCount = cands.filter(function(c){ return c.on; }).length;
+    return '' +
+      '<div class="sheet-backdrop" data-action="receipt-close"></div>' +
+      '<div class="sheet">' +
+        '<div class="sheet-head"><span>🧾 レシート取り込み</span><button class="sheet-close" data-action="receipt-close">×</button></div>' +
+        '<div class="sheet-body">' +
+          '<div class="receipt-summary">' + cands.length + '件よみとったぞう</div>' +
+          dateLine +
+          listHtml +
+        '</div>' +
+        '<div class="sheet-actions">' +
+          '<button class="btn-primary" data-action="receipt-confirm"' + (onCount ? '' : ' disabled') + '>在庫に入れるぞう</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  // ─────────────────────────────────────────
   // 全体描画
   // ─────────────────────────────────────────
   function render(){
@@ -1274,7 +1649,8 @@
       renderTabBar() +
       renderToast() +
       (S.addOpen && S.addForm ? renderAddSheet() : '') +
-      (S.editingId && S.editForm ? renderEditSheet() : '');
+      (S.editingId && S.editForm ? renderEditSheet() : '') +
+      (S.receiptOpen ? renderReceiptSheet() : '');
 
     var newSheet = app.querySelector(".sheet");
     if (newSheet) newSheet.scrollTop = savedSheetScrollTop;
@@ -1295,6 +1671,12 @@
       case "edit-name": S.editForm.name = el.value; break;
       case "edit-emoji-custom": S.editForm.emoji = el.value; break;
       case "shopping-input": S.shoppingInput = el.value; break;
+      case "receipt-text": S.receiptText = el.value; break;
+      case "rc-name": {
+        var ridx = Number(el.dataset.idx);
+        if (S.receiptCandidates[ridx]) S.receiptCandidates[ridx].name = el.value;
+        break;
+      }
     }
   }
 
@@ -1311,6 +1693,22 @@
         var newCat = el.value;
         S.editForm.cat = newCat;
         S.editForm.dept = newCat === "pet" ? null : DEPTS[newCat][0];
+        render();
+        break;
+      }
+      case "rc-cat": {
+        var cidx = Number(el.dataset.idx);
+        var cand = S.receiptCandidates[cidx];
+        if (cand) {
+          cand.cat = el.value;
+          cand.dept = cand.cat === "pet" ? null : DEPTS[cand.cat][0];
+        }
+        render();
+        break;
+      }
+      case "rc-dept": {
+        var didx = Number(el.dataset.idx);
+        if (S.receiptCandidates[didx]) S.receiptCandidates[didx].dept = el.value;
         render();
         break;
       }
@@ -1339,7 +1737,7 @@
     var action = el.dataset.action;
     switch (action) {
       case "set-tab":
-        S.tab = el.dataset.tab; S.addOpen = false; S.editingId = null; render(); break;
+        S.tab = el.dataset.tab; S.addOpen = false; S.editingId = null; S.receiptOpen = false; render(); break;
       case "open-add": openAddSheet(); break;
       case "close-add": closeAddSheet(); break;
       case "close-edit": closeEditSheet(); break;
@@ -1400,6 +1798,61 @@
         }
         hideToast();
         showToast("メモしたぞう", [], 2000);
+        break;
+      }
+      case "receipt-open": openReceiptSheet(); break;
+      case "receipt-close": closeReceiptSheet(); break;
+      case "receipt-parse": parseReceiptText(); break;
+      case "receipt-confirm": submitReceiptCandidates(); break;
+      case "rc-toggle-on": {
+        var idx1 = Number(el.dataset.idx);
+        if (S.receiptCandidates[idx1]) S.receiptCandidates[idx1].on = !S.receiptCandidates[idx1].on;
+        render();
+        break;
+      }
+      case "rc-toggle-emoji": {
+        var idx2 = Number(el.dataset.idx);
+        S.receiptEmojiOpenIdx = (S.receiptEmojiOpenIdx === idx2) ? null : idx2;
+        render();
+        break;
+      }
+      case "rc-set-emoji": {
+        if (S.receiptEmojiOpenIdx != null && S.receiptCandidates[S.receiptEmojiOpenIdx]) {
+          S.receiptCandidates[S.receiptEmojiOpenIdx].emoji = el.dataset.emoji;
+        }
+        S.receiptEmojiOpenIdx = null;
+        render();
+        break;
+      }
+      case "rc-set-type": {
+        var idx3 = Number(el.dataset.idx);
+        if (S.receiptCandidates[idx3]) S.receiptCandidates[idx3].type = el.dataset.type;
+        render();
+        break;
+      }
+      case "rc-qty-delta": {
+        var idx4 = Number(el.dataset.idx);
+        var c4 = S.receiptCandidates[idx4];
+        if (c4) c4.qty = Math.max(1, (c4.qty || 1) + Number(el.dataset.delta));
+        render();
+        break;
+      }
+      case "rc-set-gauge": {
+        var idx5 = Number(el.dataset.idx);
+        if (S.receiptCandidates[idx5]) S.receiptCandidates[idx5].gauge = Number(el.dataset.g);
+        render();
+        break;
+      }
+      case "rc-ignore": {
+        var idx6 = Number(el.dataset.idx);
+        var c6 = S.receiptCandidates[idx6];
+        if (c6) {
+          S.data.receiptDict[normalizeReceiptKey(c6.raw)] = { ignore: true };
+          persist(S.data);
+          S.receiptCandidates.splice(idx6, 1);
+          if (S.receiptEmojiOpenIdx === idx6) S.receiptEmojiOpenIdx = null;
+        }
+        render();
         break;
       }
     }
