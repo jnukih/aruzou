@@ -1,7 +1,7 @@
 // あるぞう Service Worker
 // 自分自身のファイル一式をキャッシュし、cache-firstで返す(オフラインでも開ける)。
 // 更新を配布したい時はここのバージョンを上げる(例: 'aruzou-v2')だけでよい。
-var CACHE = "aruzou-v8";
+var CACHE = "aruzou-v10";
 
 var ASSETS = [
   "./",
