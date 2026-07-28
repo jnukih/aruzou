@@ -15,8 +15,28 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1〜3 (v0.4.3)
-     冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA(ローカル版)。
+     あるぞう Phase 1〜4 (v0.5.0)
+     冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA。
+     v0.5.0: Phase 2「GAS同期」のクライアント側を実装。junとしおりの2台のiPhoneで在庫を
+     共有するための任意機能(未設定なら従来どおり完全ローカル動作)。
+     ・items/shoppingの各レコードに updatedAt(数値ms)・deleted(真偽値)を追加。migrateSyncFields()
+       で既存データへ1回きり付与。favoritesの各エントリにも同様に付与(よく買うものの削除にも
+       tombstone方式を使うため)。
+     ・削除は物理削除(splice)ではなく tombstone方式(deleted:true + updatedAt更新)に変更。
+       他端末の同期で削除済みアイテムが復活する「ゾンビ」を防ぐ。対象: アイテム削除・個数0での
+       自動削除・買い物リストのチェック済み一括削除・買い物リスト個別削除・よく買うものの削除。
+       描画・集計・検索側では findItem()/activeFavorites()、各filterで deleted を必ず除外する。
+     ・設定シートを新設(ヘッダーの🐘長押し、または買い物リスト下部の「⚙️ 設定」から開く)。
+       GAS Web App URLと合言葉はコード直書きせず localStorage(aruzou-sync-v1)に保存する。
+       接続テスト(GET)・今すぐ同期(POST)・同期ON/OFFを提供。
+     ・同期はpull+pushを1回のPOSTで行う方式(サーバーがマージして返した全データでローカルを
+       置き換える。マージロジックはクライアント側に持たない)。persist()にsyncのデバウンス
+       予約(3秒)を仕込み、あらゆるデータ変更後に自動発火する。起動時・visibilitychangeでの
+       フォアグラウンド復帰時・設定シートの「今すぐ同期」でも実行する。オフライン/失敗時は
+       ローカル動作を継続しエラーで操作をブロックしない(次回再送)。同期中フラグで多重実行を防止。
+     ・dict(食材学習辞書)/receiptDict(レシート学習辞書)/favorites(よく買うもの)は
+       dictsFromLocal()/applyDictsToLocal()でサーバーの dicts配列(kind:"food"|"receipt"|"fav" +
+       key)形式と相互変換する。favoritesはid管理していないため key = "<cat>|<name>" で一意化する。
      v0.4.3: 残量もの2列グリッドの右列がセクション枠からはみ出す不具合を修正。原因はgridの1frの下限が
      中身の最小幅(min-content)になるため、長い名前(例:塩こんぶ超徳用袋)がセルを押し広げていたこと。
      grid-template-columnsをminmax(0,1fr)にし、セルとitem-head/item-nameにmin-width:0+省略記号を追加。
@@ -59,11 +79,16 @@
        items:    [{ id, name, emoji, type:'count'|'gauge', qty, gauge(0-3),
                      cat:'fridge'|'daily'|'pet',
                      dept: 冷蔵庫='冷蔵'|'冷凍'|'野菜室'|'調味料' / 日用品='洗面所'|'風呂'|'掃除'|'洗濯'|'その他' / ペット=null,
-                     addedAt }],
-       shopping: [{ id, name, emoji, checked, cat, dept, addedAt }],
-       dict:     { <名前>: {emoji, type, cat, dept} },  // 学習辞書
-       receiptDict: { <正規化キー>: {name,emoji,type,cat,dept} または {ignore:true} } // レシート取り込みの学習辞書
+                     addedAt, updatedAt(数値ms), deleted(真偽値・tombstone) }],
+       shopping: [{ id, name, emoji, checked, cat, dept, addedAt, updatedAt, deleted }],
+       dict:     { <名前>: {emoji, type, cat, dept, updatedAt} },  // 学習辞書
+       receiptDict: { <正規化キー>: {name,emoji,type,cat,dept,updatedAt} または {ignore:true,updatedAt} } // レシート取り込みの学習辞書
+       favorites: { fridge:[{name,emoji,type,dept,updatedAt,deleted}], daily:[...], pet:[...] } // よく買うもの(削除もtombstone)
      }
+     Phase 2同期(任意機能・localStorage key: "aruzou-sync-v1")
+     { url, token, enabled } — GAS Web AppのURLと合言葉。設定シート(🐘長押し/買い物リスト下部)で入力。
+     未設定時は同期を一切行わずローカルのみで動作する。同期はpull+pushを1回のPOSTで行い、
+     サーバーがマージした全データを返す方式(クライアント側にマージロジックは持たない)。
 
      素のJS・単一HTML・ビルド無し・CDN無し・外部通信ゼロ。
      全再描画方式(状態変更 → render())。フレームワーク不使用。
@@ -468,6 +493,24 @@
     text-decoration:underline; cursor:pointer; padding:4px 2px;
   }
   .segmented.receipt-seg .seg-btn{ padding:8px 0; font-size:12.5px; min-height:36px; }
+
+  /* ── 設定シート(Phase 2 GAS同期) ── */
+  .settings-entry{
+    width:100%; text-align:center; padding:10px 0; margin-top:6px;
+    border:none; background:none; color:var(--sub2); font-size:12.5px; font-weight:600; cursor:pointer;
+  }
+  .sync-toggle-row{
+    display:flex; align-items:center; justify-content:space-between;
+    font-size:14px; font-weight:700; color:var(--text); margin-top:4px;
+  }
+  .sync-toggle-row .seg-btn{ min-width:64px; flex:none; padding:9px 16px; }
+  .sync-toggle-row .segmented{ width:auto; }
+  .sync-status{
+    font-size:12.5px; color:var(--sub2); line-height:1.5; margin-top:2px; min-height:1.5em;
+  }
+  .sync-status.ok{ color:#3E8A5C; font-weight:700; }
+  .sync-status.ng{ color:var(--danger); font-weight:700; }
+  .sync-hint{ font-size:11.5px; color:var(--sub); line-height:1.5; }
 </style>
 </head>
 <body>
@@ -685,6 +728,10 @@
   function persist(d){
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
     catch (e) { console.error("保存に失敗", e); }
+    // Phase 2同期: あらゆる変更後にデバウンス予約する(scheduleSyncは同期モジュール参照。
+    // 未設定/受信直後はscheduleSync内部で何もしない)。関数宣言はホイスティングされるため
+    // 定義順は問わない。
+    scheduleSync();
   }
   function normalizeData(d){
     if (!d || typeof d !== "object") d = {};
@@ -770,6 +817,28 @@
     d.migrations = d.migrations || {};
     d.migrations.condimentDept = true;
   }
+  // v0.5.0データ移行: Phase 2「GAS同期」用にitems/shopping/favoritesの各レコードへ
+  // updatedAt(数値ms)・deleted(真偽値)を付与する(1回きり。既に付いているものは触らない)。
+  function migrateSyncFields(d){
+    if (d.migrations && d.migrations.syncFields) return;
+    var now = Date.now();
+    (d.items || []).forEach(function(it){
+      if (typeof it.updatedAt !== "number") it.updatedAt = now;
+      if (typeof it.deleted !== "boolean") it.deleted = false;
+    });
+    (d.shopping || []).forEach(function(s){
+      if (typeof s.updatedAt !== "number") s.updatedAt = now;
+      if (typeof s.deleted !== "boolean") s.deleted = false;
+    });
+    ["fridge", "daily", "pet"].forEach(function(cat){
+      (d.favorites[cat] || []).forEach(function(f){
+        if (typeof f.updatedAt !== "number") f.updatedAt = now;
+        if (typeof f.deleted !== "boolean") f.deleted = false;
+      });
+    });
+    d.migrations = d.migrations || {};
+    d.migrations.syncFields = true;
+  }
   function loadData(){
     var d = null;
     try {
@@ -779,6 +848,7 @@
     d = normalizeData(d);
     migrateLegacyEmoji(d);
     migrateCondimentDept(d);
+    migrateSyncFields(d);
     persist(d);
     return d;
   }
@@ -804,6 +874,10 @@
     receiptParsed: null,      // parseReceipt()の結果 {date, items}
     receiptCandidates: [],    // 候補配列(編集可能な状態を持つ)
     receiptEmojiOpenIdx: null,// 絵文字ピッカーを開いている候補のインデックス(1つのみ)
+    settingsOpen: false,      // 設定シート(Phase 2 GAS同期)の開閉
+    settingsForm: null,       // { url, token, enabled } 編集中の値
+    settingsTestResult: null, // 接続テストの結果 { ok, msg } または null
+    settingsBusy: false,      // 接続テスト/今すぐ同期の実行中フラグ(ボタン多重防止)
   };
   var undoSnapshot = null; // 直前の1操作分のデータスナップショット(JSON文字列)
   var toastTimer = null;
@@ -851,57 +925,95 @@
   // ─────────────────────────────────────────
   // 在庫アイテム操作
   // ─────────────────────────────────────────
+  // 同cat+nameの既存アイテムを探す(削除済みtombstoneは除外)。新規追加時は「同名の
+  // tombstoneが無いか」も別途探して復活させる(revive)。物理削除しないため、同名を
+  // 何度も削除→追加すると配列は増え続けるが、tombstoneを再利用することで抑える。
   function upsertItem(cat, name, emoji, type, dept){
     var items = S.data.items;
     var existing = null;
+    var tombstoned = null;
     for (var i = 0; i < items.length; i++){
-      if (items[i].cat === cat && items[i].name === name) { existing = items[i]; break; }
+      if (items[i].cat === cat && items[i].name === name) {
+        if (!items[i].deleted) { existing = items[i]; break; }
+        else if (!tombstoned) { tombstoned = items[i]; }
+      }
     }
     if (existing) {
       if (existing.type === "count") existing.qty = (existing.qty || 0) + 1;
       else existing.gauge = 3;
+      existing.updatedAt = Date.now();
+    } else if (tombstoned) {
+      tombstoned.deleted = false;
+      tombstoned.emoji = emoji;
+      tombstoned.type = type;
+      tombstoned.dept = dept;
+      tombstoned.qty = type === "count" ? 1 : 0;
+      tombstoned.gauge = type === "gauge" ? 3 : 0;
+      tombstoned.updatedAt = Date.now();
     } else {
       items.push({
         id: newId(), name: name, emoji: emoji, type: type,
         qty: type === "count" ? 1 : 0,
         gauge: type === "gauge" ? 3 : 0,
-        cat: cat, dept: dept, addedAt: Date.now()
+        cat: cat, dept: dept, addedAt: Date.now(),
+        updatedAt: Date.now(), deleted: false
       });
     }
-    S.data.dict[name] = { emoji: emoji, type: type, cat: cat, dept: dept };
+    S.data.dict[name] = { emoji: emoji, type: type, cat: cat, dept: dept, updatedAt: Date.now() };
     persist(S.data);
   }
 
+  // 買い物リストに無ければ追加する。削除済み(tombstone)の同名同カテゴリがあれば
+  // 新規pushせずそれを復活させる(配列の無限増殖を防ぐ)。
   function addToShoppingIfNotExists(name, emoji, cat, dept){
-    var exists = S.data.shopping.some(function(s){ return s.name === name && s.cat === cat; });
-    if (exists) return false;
-    S.data.shopping.push({ id:newId(), name:name, emoji:emoji, checked:false, cat:cat, dept:dept, addedAt:Date.now() });
+    var list = S.data.shopping;
+    var existing = null;
+    var tombstoned = null;
+    for (var i = 0; i < list.length; i++){
+      if (list[i].name === name && list[i].cat === cat) {
+        if (!list[i].deleted) { existing = list[i]; break; }
+        else if (!tombstoned) { tombstoned = list[i]; }
+      }
+    }
+    if (existing) return false;
+    if (tombstoned) {
+      tombstoned.deleted = false;
+      tombstoned.checked = false;
+      tombstoned.emoji = emoji;
+      tombstoned.dept = dept;
+      tombstoned.updatedAt = Date.now();
+    } else {
+      list.push({ id:newId(), name:name, emoji:emoji, checked:false, cat:cat, dept:dept, addedAt:Date.now(), updatedAt:Date.now(), deleted:false });
+    }
     persist(S.data);
     return true;
   }
 
+  // 削除済み(tombstone)は無かったものとして扱う共通関数。以後のロジックは全てこれ経由で
+  // アイテムを取得するため、deleted:trueのレコードが誤って操作対象になることはない。
   function findItem(id){
     for (var i = 0; i < S.data.items.length; i++){
-      if (S.data.items[i].id === id) return S.data.items[i];
+      if (S.data.items[i].id === id && !S.data.items[i].deleted) return S.data.items[i];
     }
     return null;
   }
 
-  // 個数ものを1個消費する。0になったら在庫から消え、買い物リストへの追加を促すトーストを出す
+  // 個数ものを1個消費する。0になったらtombstone化(deleted:true)し、買い物リストへの追加を促すトーストを出す
   function consumeItem(id){
     var it = findItem(id);
     if (!it || it.type !== "count") return;
     pushUndo();
     it.qty -= 1;
     if (it.qty <= 0) {
-      var idx = S.data.items.indexOf(it);
-      S.data.items.splice(idx, 1);
+      it.deleted = true;
+      it.updatedAt = Date.now();
       persist(S.data);
       showToast("つかいきったぞう！", [
         { label:"もどす", action:"toast-undo" },
         { label:"🛒買い物リストに入れる", action:"toast-add-shopping" }
       ], 6000, { name: it.name, emoji: it.emoji, cat: it.cat, dept: it.dept });
     } else {
+      it.updatedAt = Date.now();
       persist(S.data);
       flashThenRender(it.id);
       showToast("つかったぞう", [{ label:"もどす", action:"toast-undo" }], 3000);
@@ -915,6 +1027,7 @@
     if (it.gauge <= 0) return;
     pushUndo();
     it.gauge -= 1;
+    it.updatedAt = Date.now();
     persist(S.data);
     if (it.gauge <= 1) {
       addToShoppingIfNotExists(it.name, it.emoji, it.cat, it.dept);
@@ -926,12 +1039,14 @@
     }
   }
 
+  // アイテム削除はtombstone方式(deleted:true + updatedAt更新)。物理削除(splice)すると
+  // 他端末との同期で復活する(ゾンビ)ため使わない。
   function deleteItem(id){
     var it = findItem(id);
     if (!it) return;
     pushUndo();
-    var idx = S.data.items.indexOf(it);
-    S.data.items.splice(idx, 1);
+    it.deleted = true;
+    it.updatedAt = Date.now();
     persist(S.data);
     closeEditSheet();
     showToast("けしたぞう", [{ label:"もどす", action:"toast-undo" }], 3500);
@@ -956,25 +1071,44 @@
 
   var FAVORITES_LIMIT = 20;
 
-  // よく買うものへ追加(重複無視・上限あり)。 { ok, reason:"full"|"duplicate" } を返す
+  // 削除済み(tombstone)を除いた「よく買うもの」一覧。描画・重複判定・上限カウントは
+  // すべてこれ経由にすることでdeletedレコードが表示/カウントに紛れ込まないようにする。
+  function activeFavorites(cat){
+    return (S.data.favorites[cat] || []).filter(function(p){ return !p.deleted; });
+  }
+
+  // よく買うものへ追加(重複無視・上限あり)。 { ok, reason:"full"|"duplicate" } を返す。
+  // 削除済み(tombstone)の同名エントリがあれば復活させる(配列の無限増殖を防ぐ)。
   function addFavoriteIfPossible(cat, name, emoji, type, dept){
     var list = S.data.favorites[cat];
     if (!list) return { ok:false };
-    if (list.some(function(p){ return p.name === name; })) return { ok:true, duplicate:true };
-    if (list.length >= FAVORITES_LIMIT) return { ok:false, reason:"full" };
-    list.push({ name:name, emoji:emoji, type:type, dept:dept });
+    var existing = null;
+    for (var i = 0; i < list.length; i++){ if (list[i].name === name) { existing = list[i]; break; } }
+    if (existing && !existing.deleted) return { ok:true, duplicate:true };
+    if (!existing && activeFavorites(cat).length >= FAVORITES_LIMIT) return { ok:false, reason:"full" };
+    if (existing) {
+      existing.deleted = false;
+      existing.emoji = emoji;
+      existing.type = type;
+      existing.dept = dept;
+      existing.updatedAt = Date.now();
+    } else {
+      list.push({ name:name, emoji:emoji, type:type, dept:dept, updatedAt:Date.now(), deleted:false });
+    }
     persist(S.data);
     return { ok:true };
   }
 
+  // よく買うものの削除もtombstone方式(deleted:true + updatedAt更新)にする。
   function deleteFavorite(cat, name){
     var list = S.data.favorites[cat];
     if (!list) return;
     var idx = -1;
-    for (var i = 0; i < list.length; i++){ if (list[i].name === name) { idx = i; break; } }
+    for (var i = 0; i < list.length; i++){ if (list[i].name === name && !list[i].deleted) { idx = i; break; } }
     if (idx < 0) return;
     pushUndo();
-    list.splice(idx, 1);
+    list[idx].deleted = true;
+    list[idx].updatedAt = Date.now();
     persist(S.data);
     showToast("けしたぞう", [{ label:"もどす", action:"toast-undo" }], 3000);
   }
@@ -995,16 +1129,17 @@
     if (!name) return;
     var emoji = (f.emoji || "").trim() || defaultEmojiForCat(f.cat);
     var dept = f.cat === "pet" ? null : f.dept;
-    var existedBefore = S.data.items.some(function(it){ return it.cat === f.cat && it.name === name; });
+    var existedBefore = S.data.items.some(function(it){ return it.cat === f.cat && it.name === name && !it.deleted; });
     upsertItem(f.cat, name, emoji, f.type, dept);
     if (!existedBefore) {
       var it = null;
       for (var i = 0; i < S.data.items.length; i++){
-        if (S.data.items[i].cat === f.cat && S.data.items[i].name === name) { it = S.data.items[i]; break; }
+        if (S.data.items[i].cat === f.cat && S.data.items[i].name === name && !S.data.items[i].deleted) { it = S.data.items[i]; break; }
       }
       if (it) {
         if (f.type === "count") it.qty = Math.max(1, Number(f.qty) || 1);
         else it.gauge = Number(f.gauge);
+        it.updatedAt = Date.now();
         persist(S.data);
       }
     }
@@ -1065,7 +1200,8 @@
       it.qty = 0;
       if (it.gauge <= 1) addToShoppingIfNotExists(it.name, it.emoji, it.cat, it.dept);
     }
-    S.data.dict[it.name] = { emoji: it.emoji, type: it.type, cat: it.cat, dept: it.dept };
+    it.updatedAt = Date.now();
+    S.data.dict[it.name] = { emoji: it.emoji, type: it.type, cat: it.cat, dept: it.dept, updatedAt: Date.now() };
     persist(S.data);
     closeEditSheet();
   }
@@ -1088,36 +1224,45 @@
   function toggleShoppingChecked(id){
     var s = null;
     for (var i = 0; i < S.data.shopping.length; i++){
-      if (S.data.shopping[i].id === id) { s = S.data.shopping[i]; break; }
+      if (S.data.shopping[i].id === id && !S.data.shopping[i].deleted) { s = S.data.shopping[i]; break; }
     }
     if (!s) return;
     s.checked = !s.checked;
+    s.updatedAt = Date.now();
     persist(S.data);
     render();
   }
+  // 買い物リストの削除もtombstone方式(deleted:true + updatedAt更新)にする。
   function deleteShoppingItem(id){
-    var idx = -1;
+    var s = null;
     for (var i = 0; i < S.data.shopping.length; i++){
-      if (S.data.shopping[i].id === id) { idx = i; break; }
+      if (S.data.shopping[i].id === id && !S.data.shopping[i].deleted) { s = S.data.shopping[i]; break; }
     }
-    if (idx < 0) return;
+    if (!s) return;
     pushUndo();
-    S.data.shopping.splice(idx, 1);
+    s.deleted = true;
+    s.updatedAt = Date.now();
     persist(S.data);
     showToast("けしたぞう", [{ label:"もどす", action:"toast-undo" }], 3000);
   }
+  // チェック済み一括削除もtombstone方式。配列からsplice/filterで取り除かず、
+  // 該当レコードにdeleted:trueを立てるだけにする(他端末同期での復活防止)。
   function clearCheckedShopping(){
-    var hasChecked = S.data.shopping.some(function(s){ return s.checked; });
+    var hasChecked = S.data.shopping.some(function(s){ return s.checked && !s.deleted; });
     if (!hasChecked) return;
     pushUndo();
-    S.data.shopping = S.data.shopping.filter(function(s){ return !s.checked; });
+    var now = Date.now();
+    S.data.shopping.forEach(function(s){
+      if (s.checked && !s.deleted) { s.deleted = true; s.updatedAt = now; }
+    });
     persist(S.data);
     showToast("けしたぞう", [{ label:"もどす", action:"toast-undo" }], 3000);
   }
   function moveCheckedToStock(){
-    var checked = S.data.shopping.filter(function(s){ return s.checked; });
+    var checked = S.data.shopping.filter(function(s){ return s.checked && !s.deleted; });
     if (!checked.length) return;
     pushUndo();
+    var now = Date.now();
     checked.forEach(function(s){
       var known = S.data.dict[s.name];
       var cat = s.cat || (known && known.cat) || "fridge";
@@ -1125,8 +1270,9 @@
       if (cat === "pet") dept = null;
       var type = (known && known.type) || "count";
       upsertItem(cat, s.name, s.emoji || "🛒", type, dept);
+      s.deleted = true;
+      s.updatedAt = now;
     });
-    S.data.shopping = S.data.shopping.filter(function(s){ return !s.checked; });
     persist(S.data);
     showToast("いれたぞう！", [{ label:"もどす", action:"toast-undo" }], 4000);
   }
@@ -1248,7 +1394,7 @@
     // 包含判定は1文字キー("塩""魚""油"等)だと誤爆しやすいので2文字未満は対象から除く
     var invMatch = null;
     S.data.items.some(function(it){
-      if (!it.name || it.name.length < 2) return false;
+      if (!it.name || it.name.length < 2 || it.deleted) return false;
       if (key.indexOf(it.name) !== -1 || (key.length >= 2 && it.name.indexOf(key) !== -1)) { invMatch = it; return true; }
       return false;
     });
@@ -1333,15 +1479,254 @@
       // 個数ものはqty回upsertして加算、残量ものは1回でたっぷり(3)に戻す
       var times = c.type === "count" ? Math.max(1, Number(c.qty) || 1) : 1;
       for (var i = 0; i < times; i++){ upsertItem(c.cat, name, emoji, c.type, dept); }
-      // 買い物リストの同名は消し込む
-      S.data.shopping = S.data.shopping.filter(function(s){ return !(s.name === name && s.cat === c.cat); });
+      // 買い物リストの同名は消し込む(tombstone方式。他端末同期での復活を防ぐ)
+      var now = Date.now();
+      S.data.shopping.forEach(function(s){
+        if (s.name === name && s.cat === c.cat && !s.deleted) { s.deleted = true; s.updatedAt = now; }
+      });
       // 学習辞書へ記録
-      S.data.receiptDict[normalizeReceiptKey(c.raw)] = { name: name, emoji: emoji, type: c.type, cat: c.cat, dept: dept };
+      S.data.receiptDict[normalizeReceiptKey(c.raw)] = { name: name, emoji: emoji, type: c.type, cat: c.cat, dept: dept, updatedAt: Date.now() };
       count++;
     });
     persist(S.data);
     closeReceiptSheet();
     showToast(count + "個いれたぞう", [{ label:"もどす", action:"toast-undo" }], 4000);
+  }
+
+  // ─────────────────────────────────────────
+  // Phase 2: GAS同期
+  // ─────────────────────────────────────────
+  var SYNC_KEY = "aruzou-sync-v1";
+  // SYNC.config = { url, token, enabled } はlocalStorage(SYNC_KEY)に保存する設定。
+  // コードには絶対に直書きしない(GitHubの公開リポジトリに載るため)。
+  var SYNC = {
+    config: { url:"", token:"", enabled:false },
+    syncing: false,        // 同期リクエスト中フラグ(多重実行防止)
+    debounceTimer: null,   // データ変更後のデバウンス予約タイマー
+    applyingRemote: false  // サーバー受信結果を書き戻している最中はscheduleSyncを起動しない
+  };
+
+  function loadSyncConfig(){
+    try {
+      var raw = localStorage.getItem(SYNC_KEY);
+      if (raw) {
+        var c = JSON.parse(raw);
+        if (c && typeof c === "object") {
+          SYNC.config.url = typeof c.url === "string" ? c.url : "";
+          SYNC.config.token = typeof c.token === "string" ? c.token : "";
+          SYNC.config.enabled = !!c.enabled;
+        }
+      }
+    } catch (e) {}
+  }
+  function persistSyncConfig(){
+    try { localStorage.setItem(SYNC_KEY, JSON.stringify(SYNC.config)); }
+    catch (e) { console.error("同期設定の保存に失敗", e); }
+  }
+
+  // ── dict/receiptDict/favorites ⇔ サーバーのdicts配列(kind+key方式)の相互変換 ──
+  // kind: "food"=S.data.dict(食材学習辞書) / "receipt"=S.data.receiptDict(レシート学習辞書) /
+  // "fav"=S.data.favorites(よく買うもの)。favoritesはid管理していないため key="<cat>|<name>"で一意化する。
+  function dictsFromLocal(){
+    var out = [];
+    Object.keys(S.data.dict || {}).forEach(function(name){
+      var e = S.data.dict[name] || {};
+      out.push({
+        kind:"food", key:name, name:name, emoji:e.emoji || "", type:e.type || "",
+        cat:e.cat || "", dept:e.dept != null ? e.dept : null, ignore:false,
+        updatedAt: e.updatedAt || Date.now(), deleted:false
+      });
+    });
+    Object.keys(S.data.receiptDict || {}).forEach(function(key){
+      var e = S.data.receiptDict[key] || {};
+      out.push({
+        kind:"receipt", key:key, name:e.name || "", emoji:e.emoji || "", type:e.type || "",
+        cat:e.cat || "", dept:e.dept != null ? e.dept : null, ignore: !!e.ignore,
+        updatedAt: e.updatedAt || Date.now(), deleted:false
+      });
+    });
+    ["fridge", "daily", "pet"].forEach(function(cat){
+      (S.data.favorites[cat] || []).forEach(function(f){
+        out.push({
+          kind:"fav", key: cat + "|" + f.name, name:f.name, emoji:f.emoji || "", type:f.type || "",
+          cat:cat, dept: f.dept != null ? f.dept : null, ignore:false,
+          updatedAt: f.updatedAt || Date.now(), deleted: !!f.deleted
+        });
+      });
+    });
+    return out;
+  }
+  // サーバーから返ってきたマージ済みdicts配列を S.data.dict/receiptDict/favorites に反映する
+  // (全置き換え。クライアント側にマージロジックは持たない)。
+  function applyDictsToLocal(dicts){
+    var dict = {};
+    var receiptDict = {};
+    var favorites = { fridge:[], daily:[], pet:[] };
+    (dicts || []).forEach(function(r){
+      if (!r || !r.kind) return;
+      if (r.kind === "food") {
+        if (r.deleted) return; // food辞書はローカルに削除機能が無いため、来た場合は反映しないだけでよい
+        dict[r.key] = { emoji:r.emoji, type:r.type, cat:r.cat, dept: r.dept != null ? r.dept : null, updatedAt: r.updatedAt || Date.now() };
+      } else if (r.kind === "receipt") {
+        if (r.deleted) return;
+        receiptDict[r.key] = r.ignore
+          ? { ignore:true, updatedAt: r.updatedAt || Date.now() }
+          : { name:r.name, emoji:r.emoji, type:r.type, cat:r.cat, dept: r.dept != null ? r.dept : null, updatedAt: r.updatedAt || Date.now() };
+      } else if (r.kind === "fav") {
+        if (!favorites[r.cat]) return; // 想定外のcatは無視
+        favorites[r.cat].push({
+          name:r.name, emoji:r.emoji, type:r.type, dept: r.dept != null ? r.dept : null,
+          updatedAt: r.updatedAt || Date.now(), deleted: !!r.deleted
+        });
+      }
+    });
+    S.data.dict = dict;
+    S.data.receiptDict = receiptDict;
+    S.data.favorites = favorites;
+  }
+
+  // データ変更のたびにpersist()から呼ばれる。3秒デバウンスして自動同期する。
+  // 未設定/同期OFFなら何もしない(ローカル動作を邪魔しない)。サーバー受信結果を書き戻して
+  // いる最中(applyingRemote)は呼ばない(無限ループ防止)。
+  function scheduleSync(){
+    if (SYNC.applyingRemote) return;
+    if (!SYNC.config.enabled || !SYNC.config.url || !SYNC.config.token) return;
+    if (SYNC.debounceTimer) clearTimeout(SYNC.debounceTimer);
+    SYNC.debounceTimer = setTimeout(function(){
+      SYNC.debounceTimer = null;
+      runSync({ manual:false });
+    }, 3000);
+  }
+
+  // pull+pushを1回のPOSTで行う。ローカルの全データ(items/shopping/dicts、tombstoneも含む)を
+  // 送り、サーバーがマージした結果を丸ごと受け取ってローカルを置き換える。
+  // opts.manual=true のときだけトースト表示する(自動同期は静かに済ませる)。
+  function runSync(opts){
+    opts = opts || {};
+    var cfg = SYNC.config;
+    if (!cfg.enabled || !cfg.url || !cfg.token) return;
+    if (SYNC.syncing) return;
+    SYNC.syncing = true;
+    var payload;
+    try {
+      payload = JSON.stringify({
+        token: cfg.token,
+        items: S.data.items,
+        shopping: S.data.shopping,
+        dicts: dictsFromLocal()
+      });
+    } catch (e) {
+      SYNC.syncing = false;
+      return;
+    }
+    fetch(cfg.url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" }, // application/jsonにするとCORSプリフライトが飛びGASが応答できないため必須
+      body: payload
+    }).then(function(res){ return res.json(); }).then(function(json){
+      SYNC.syncing = false;
+      if (json && json.ok) {
+        applySyncResult(json);
+        if (opts.manual) showToast("そろえたぞう", [], 2200);
+      } else {
+        console.warn("同期に失敗", json && json.error);
+        if (opts.manual) showToast("同期できなかったぞう…", [], 2600);
+      }
+    }).catch(function(err){
+      SYNC.syncing = false;
+      console.warn("同期エラー", err);
+      if (opts.manual) showToast("同期できなかったぞう(通信エラー)", [], 2600);
+    });
+  }
+
+  // サーバーのマージ結果でローカルを置き換えて保存・再描画する
+  function applySyncResult(json){
+    SYNC.applyingRemote = true;
+    try {
+      S.data.items = Array.isArray(json.items) ? json.items : [];
+      S.data.shopping = Array.isArray(json.shopping) ? json.shopping : [];
+      applyDictsToLocal(Array.isArray(json.dicts) ? json.dicts : []);
+      persist(S.data);
+    } finally {
+      SYNC.applyingRemote = false;
+    }
+    render();
+  }
+
+  // ── 設定シート ──
+  function openSettingsSheet(){
+    S.settingsOpen = true;
+    S.settingsForm = { url: SYNC.config.url || "", token: SYNC.config.token || "", enabled: !!SYNC.config.enabled };
+    S.settingsTestResult = null;
+    S.settingsBusy = false;
+    S.addOpen = false;
+    S.editingId = null;
+    S.receiptOpen = false;
+    render();
+  }
+  function closeSettingsSheet(){
+    S.settingsOpen = false;
+    S.settingsForm = null;
+    S.settingsTestResult = null;
+    render();
+  }
+  // 編集中のフォーム内容をSYNC.configへ確定保存する
+  function commitSettingsForm(){
+    if (!S.settingsForm) return;
+    SYNC.config.url = (S.settingsForm.url || "").trim();
+    SYNC.config.token = (S.settingsForm.token || "").trim();
+    SYNC.config.enabled = !!S.settingsForm.enabled;
+    persistSyncConfig();
+  }
+  // 接続テスト: GETを叩いてok:trueが返るか確認する
+  function testSyncConnection(){
+    commitSettingsForm();
+    var cfg = SYNC.config;
+    if (!cfg.url || !cfg.token) {
+      S.settingsTestResult = { ok:false, msg:"URLと合言葉を入力してね" };
+      render();
+      return;
+    }
+    S.settingsBusy = true;
+    S.settingsTestResult = null;
+    render();
+    var sep = cfg.url.indexOf("?") === -1 ? "?" : "&";
+    fetch(cfg.url + sep + "token=" + encodeURIComponent(cfg.token))
+      .then(function(res){ return res.json(); })
+      .then(function(json){
+        S.settingsBusy = false;
+        if (json && json.ok) {
+          S.settingsTestResult = { ok:true, msg:"つながったぞう" };
+        } else {
+          S.settingsTestResult = { ok:false, msg:"つながらなかったぞう(" + ((json && json.error) || "不明なエラー") + ")" };
+        }
+        render();
+      })
+      .catch(function(err){
+        S.settingsBusy = false;
+        S.settingsTestResult = { ok:false, msg:"つながらなかったぞう(承認待ち、またはURL/通信を確認してね)" };
+        render();
+        console.warn("接続テストエラー", err);
+      });
+  }
+  // 今すぐ同期: フォームの内容を確定保存してから手動同期する
+  function syncNow(){
+    commitSettingsForm();
+    if (!SYNC.config.url || !SYNC.config.token) {
+      S.settingsTestResult = { ok:false, msg:"URLと合言葉を入力してね" };
+      render();
+      return;
+    }
+    if (!SYNC.config.enabled) {
+      S.settingsTestResult = { ok:false, msg:"同期がOFFになってるぞう" };
+      render();
+      return;
+    }
+    S.settingsBusy = true;
+    render();
+    runSync({ manual:true });
+    // runSync自体は非同期でトースト表示するため、ボタンのbusy状態は簡易に少し後で解除する
+    setTimeout(function(){ S.settingsBusy = false; render(); }, 1200);
   }
 
   // ─────────────────────────────────────────
@@ -1413,8 +1798,10 @@
   // ─────────────────────────────────────────
   // 描画: タブ本体
   // ─────────────────────────────────────────
+  // ヘッダーの🐘は長押しで設定シート(Phase 2 GAS同期)を開ける隠し入口(data-action="header-emoji"、
+  // 長押し判定はhandlePressStart/handlePressEnd参照)。買い物リスト下部の「⚙️ 設定」からも開ける。
   function renderHeader(){
-    return '<div class="header"><span class="header-emoji">🐘</span><span class="header-title">あるぞう</span></div>';
+    return '<div class="header"><span class="header-emoji" data-action="header-emoji">🐘</span><span class="header-title">あるぞう</span></div>';
   }
 
   function renderTabBar(){
@@ -1446,7 +1833,7 @@
   }
 
   function renderStockTab(cat){
-    var items = S.data.items.filter(function(it){ return it.cat === cat; });
+    var items = S.data.items.filter(function(it){ return it.cat === cat && !it.deleted; });
     var addBtn = '<button class="add-btn" data-action="open-add">＋ 追加</button>';
     if (!items.length) {
       return '<div class="tab-body">' + addBtn + emptyStateHtml("なんにもないぞう…") + '</div>';
@@ -1488,15 +1875,16 @@
   }
 
   function renderShoppingTab(){
-    var list = S.data.shopping;
+    var list = S.data.shopping.filter(function(s){ return !s.deleted; });
     var receiptBtn = '<button class="receipt-btn" data-action="receipt-open">🧾 レシート取り込み</button>';
     var inputRow = '<div class="shopping-add-row">' +
       '<input class="field" type="text" placeholder="かうものの名前" data-field="shopping-input" value="' + esc(S.shoppingInput || '') + '">' +
       '<button class="add-btn small" data-action="shopping-add">＋</button>' +
     '</div>';
+    var settingsLink = '<button class="settings-entry" data-action="settings-open">⚙️ 設定(iPhone同期)</button>';
 
     if (!list.length) {
-      return '<div class="tab-body">' + receiptBtn + inputRow + emptyStateHtml("かうものはないぞう！") + '</div>';
+      return '<div class="tab-body">' + receiptBtn + inputRow + emptyStateHtml("かうものはないぞう！") + settingsLink + '</div>';
     }
 
     function groupKey(cat, dept){ return (cat || "none") + "|" + (dept || "none"); }
@@ -1537,7 +1925,7 @@
       '<button class="btn-primary" data-action="shopping-move-to-stock"' + (hasChecked ? '' : ' disabled') + '>チェック済みを在庫に入れる</button>' +
     '</div>';
 
-    return '<div class="tab-body">' + receiptBtn + inputRow + sections + actions + '</div>';
+    return '<div class="tab-body">' + receiptBtn + inputRow + sections + actions + settingsLink + '</div>';
   }
 
   // ─────────────────────────────────────────
@@ -1546,8 +1934,8 @@
   function renderAddSheet(){
     var f = S.addForm;
     var cat = f.cat;
-    var favorites = S.data.favorites[cat] || [];
-    var stockList = S.data.items.filter(function(it){ return it.cat === cat; });
+    var favorites = activeFavorites(cat);
+    var stockList = S.data.items.filter(function(it){ return it.cat === cat && !it.deleted; });
     var editMode = S.favoritesEditMode;
     var presetGrid = favorites.map(function(p){
       var flashCls = (S.presetFlashKey === (cat + "|" + p.name)) ? ' flash' : '';
@@ -1753,6 +2141,42 @@
   }
 
   // ─────────────────────────────────────────
+  // 描画: 設定シート(Phase 2 GAS同期)
+  // ─────────────────────────────────────────
+  function renderSettingsSheet(){
+    var f = S.settingsForm || { url:"", token:"", enabled:false };
+    var result = S.settingsTestResult;
+    var resultCls = result ? (result.ok ? " ok" : " ng") : "";
+    var resultHtml = result ? esc(result.msg) : "";
+    var busy = S.settingsBusy;
+    return '' +
+      '<div class="sheet-backdrop" data-action="close-settings"></div>' +
+      '<div class="sheet">' +
+        '<div class="sheet-head"><span>⚙️ 設定(iPhone同期)</span><button class="sheet-close" data-action="close-settings">×</button></div>' +
+        '<div class="sheet-body">' +
+          '<div class="sync-hint">junとしおりの2台で在庫を共有するための機能だぞう。未設定ならこのまま今までどおりローカルだけで動くぞう。</div>' +
+          '<div class="sheet-label">GAS Web App URL</div>' +
+          '<input class="field" type="text" placeholder="https://script.google.com/macros/s/.../exec" data-field="settings-url" value="' + esc(f.url) + '">' +
+          '<div class="sheet-label">合言葉</div>' +
+          '<input class="field" type="text" placeholder="合言葉" data-field="settings-token" value="' + esc(f.token) + '">' +
+          '<div class="sheet-label">同期</div>' +
+          '<div class="sync-toggle-row">' +
+            '<span>この端末での同期</span>' +
+            '<div class="segmented">' +
+              '<button class="seg-btn' + (f.enabled ? '' : ' active') + '" data-action="settings-set-enabled" data-enabled="0">OFF</button>' +
+              '<button class="seg-btn' + (f.enabled ? ' active' : '') + '" data-action="settings-set-enabled" data-enabled="1">ON</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="sync-status' + resultCls + '">' + resultHtml + '</div>' +
+        '</div>' +
+        '<div class="sheet-actions">' +
+          '<button class="btn-outline" data-action="settings-test"' + (busy ? ' disabled' : '') + '>接続テスト</button>' +
+          '<button class="btn-primary" data-action="settings-sync-now"' + (busy ? ' disabled' : '') + '>今すぐ同期</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  // ─────────────────────────────────────────
   // 全体描画
   // ─────────────────────────────────────────
   function render(){
@@ -1778,7 +2202,8 @@
       renderToast() +
       (S.addOpen && S.addForm ? renderAddSheet() : '') +
       (S.editingId && S.editForm ? renderEditSheet() : '') +
-      (S.receiptOpen ? renderReceiptSheet() : '');
+      (S.receiptOpen ? renderReceiptSheet() : '') +
+      (S.settingsOpen && S.settingsForm ? renderSettingsSheet() : '');
 
     var newSheet = app.querySelector(".sheet");
     if (newSheet) newSheet.scrollTop = savedSheetScrollTop;
@@ -1805,6 +2230,8 @@
         if (S.receiptCandidates[ridx]) S.receiptCandidates[ridx].name = el.value;
         break;
       }
+      case "settings-url": if (S.settingsForm) S.settingsForm.url = el.value; break;
+      case "settings-token": if (S.settingsForm) S.settingsForm.token = el.value; break;
     }
   }
 
@@ -1849,6 +2276,7 @@
     var field = el.dataset && el.dataset.field;
     if (field === "add-name") { trySuggest(S.addForm, S.addForm.name); render(); }
     else if (field === "edit-name") { trySuggest(S.editForm, S.editForm.name); render(); }
+    else if (field === "settings-url" || field === "settings-token") { commitSettingsForm(); }
   }
 
   function handleKeydown(e){
@@ -1865,7 +2293,7 @@
     var action = el.dataset.action;
     switch (action) {
       case "set-tab":
-        S.tab = el.dataset.tab; S.addOpen = false; S.editingId = null; S.receiptOpen = false; render(); break;
+        S.tab = el.dataset.tab; S.addOpen = false; S.editingId = null; S.receiptOpen = false; S.settingsOpen = false; render(); break;
       case "open-add": openAddSheet(); break;
       case "close-add": closeAddSheet(); break;
       case "close-edit": closeEditSheet(); break;
@@ -1875,7 +2303,7 @@
       case "add-preset": {
         var pname = el.dataset.name;
         var preset = null;
-        var list = S.data.favorites[S.addForm.cat] || [];
+        var list = activeFavorites(S.addForm.cat);
         for (var i = 0; i < list.length; i++){ if (list[i].name === pname) { preset = list[i]; break; } }
         if (preset) addPreset(S.addForm.cat, preset);
         break;
@@ -1975,7 +2403,7 @@
         var idx6 = Number(el.dataset.idx);
         var c6 = S.receiptCandidates[idx6];
         if (c6) {
-          S.data.receiptDict[normalizeReceiptKey(c6.raw)] = { ignore: true };
+          S.data.receiptDict[normalizeReceiptKey(c6.raw)] = { ignore: true, updatedAt: Date.now() };
           persist(S.data);
           S.receiptCandidates.splice(idx6, 1);
           if (S.receiptEmojiOpenIdx === idx6) S.receiptEmojiOpenIdx = null;
@@ -1983,7 +2411,34 @@
         render();
         break;
       }
+      case "header-emoji": break; // クリック自体は何もしない(長押しはhandlePressStart側で処理)
+      case "settings-open": openSettingsSheet(); break;
+      case "close-settings": closeSettingsSheet(); break;
+      case "settings-set-enabled": {
+        if (S.settingsForm) S.settingsForm.enabled = el.dataset.enabled === "1";
+        commitSettingsForm();
+        render();
+        break;
+      }
+      case "settings-test": testSyncConnection(); break;
+      case "settings-sync-now": syncNow(); break;
     }
+  }
+
+  // ヘッダーの🐘長押しで設定シートを開く(隠し入口)。data-action="header-emoji"の要素を
+  // 押し始めてから650ms後に離さず保持していたら開く。タップ(短押し)では何も起きない。
+  var headerLongPressTimer = null;
+  function handlePressStart(e){
+    var el = e.target.closest('[data-action="header-emoji"]');
+    if (!el) return;
+    if (headerLongPressTimer) clearTimeout(headerLongPressTimer);
+    headerLongPressTimer = setTimeout(function(){
+      headerLongPressTimer = null;
+      openSettingsSheet();
+    }, 650);
+  }
+  function handlePressEnd(){
+    if (headerLongPressTimer) { clearTimeout(headerLongPressTimer); headerLongPressTimer = null; }
   }
 
   function init(){
@@ -1993,9 +2448,27 @@
     app.addEventListener("change", handleChange);
     app.addEventListener("focusout", handleFocusOut);
     app.addEventListener("keydown", handleKeydown);
+    // ヘッダー🐘の長押し検出(touchとmouse両対応。iOS実機はtouch、プレビュー確認はmouseで使う)
+    app.addEventListener("touchstart", handlePressStart, { passive:true });
+    app.addEventListener("touchend", handlePressEnd);
+    app.addEventListener("touchcancel", handlePressEnd);
+    app.addEventListener("mousedown", handlePressStart);
+    app.addEventListener("mouseup", handlePressEnd);
+    app.addEventListener("mouseleave", handlePressEnd);
 
+    loadSyncConfig();
     S.data = loadData();
     render();
+
+    // Phase 2同期: 起動時(設定済みなら)に1回実行する。以後はpersist()経由のデバウンス自動同期・
+    // visibilitychangeでのフォアグラウンド復帰・設定シートの「今すぐ同期」で実行する。
+    // loadData()内のpersist()が既にデバウンス予約している場合があるので、二重発火を避けるため
+    // 一旦クリアしてから即時実行する。
+    if (SYNC.debounceTimer) { clearTimeout(SYNC.debounceTimer); SYNC.debounceTimer = null; }
+    runSync({ manual:false });
+    document.addEventListener("visibilitychange", function(){
+      if (document.visibilityState === "visible") runSync({ manual:false });
+    });
   }
 
   init();
