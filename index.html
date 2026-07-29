@@ -15,8 +15,15 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1〜4 (v0.5.0)
+     あるぞう Phase 1〜4 (v0.5.1)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA。
+     v0.5.1: 🐛同期の重大バグ修正「消費してもすぐ元に戻る」。原因は2つで、
+     (1) runSync が同期中の要求を `if (SYNC.syncing) return;` で捨てていたため、POSTの往復中
+         (数秒)に行った操作がサーバーへ永久に届かなかった → SYNC.pendingSync に覚えて
+         完了後に flushPendingSync() で必ず送り直す。
+     (2) applySyncResult がサーバーの応答で items/shopping/dicts を丸ごと置き換えていたため、
+         往復中のローカル変更が消えた → mergeRemoteRecords() でレコード単位に
+         updatedAt の新しい方を残し、サーバーにまだ無いローカル分も落とさないようにした。
      v0.5.0: Phase 2「GAS同期」のクライアント側を実装。junとしおりの2台のiPhoneで在庫を
      共有するための任意機能(未設定なら従来どおり完全ローカル動作)。
      ・items/shoppingの各レコードに updatedAt(数値ms)・deleted(真偽値)を追加。migrateSyncFields()
@@ -1502,9 +1509,32 @@
   var SYNC = {
     config: { url:"", token:"", enabled:false },
     syncing: false,        // 同期リクエスト中フラグ(多重実行防止)
+    pendingSync: false,    // 同期中に起きた変更。完了後に必ず送り直す(捨てると変更が消える)
     debounceTimer: null,   // データ変更後のデバウンス予約タイマー
     applyingRemote: false  // サーバー受信結果を書き戻している最中はscheduleSyncを起動しない
   };
+
+  // サーバーの結果をローカルへ取り込む際のレコード単位マージ。
+  // POSTの往復中(数秒)にローカルで起きた変更はサーバーの応答に含まれないので、
+  // 丸ごと置き換えると消える(「消したのに戻る」の原因)。updatedAtが新しい方を残す。
+  function mergeRemoteRecords(localArr, remoteArr, keyOf){
+    var localByKey = {};
+    (localArr || []).forEach(function(r){ if (r) localByKey[keyOf(r)] = r; });
+    var out = [];
+    var used = {};
+    (remoteArr || []).forEach(function(rem){
+      if (!rem) return;
+      var k = keyOf(rem);
+      used[k] = true;
+      var loc = localByKey[k];
+      out.push(loc && Number(loc.updatedAt || 0) > Number(rem.updatedAt || 0) ? loc : rem);
+    });
+    // サーバーにまだ無いローカル分(往復中に追加された等)は落とさず残す
+    (localArr || []).forEach(function(loc){
+      if (loc && !used[keyOf(loc)]) out.push(loc);
+    });
+    return out;
+  }
 
   function loadSyncConfig(){
     try {
@@ -1605,7 +1635,9 @@
     opts = opts || {};
     var cfg = SYNC.config;
     if (!cfg.enabled || !cfg.url || !cfg.token) return;
-    if (SYNC.syncing) return;
+    // 同期中に来た要求は捨てずに覚えておき、完了後に送り直す。
+    // 捨てるとその間の操作(消費など)が永久にサーバーへ届かない。
+    if (SYNC.syncing) { SYNC.pendingSync = true; return; }
     SYNC.syncing = true;
     var payload;
     try {
@@ -1632,20 +1664,31 @@
         console.warn("同期に失敗", json && json.error);
         if (opts.manual) showToast("同期できなかったぞう…", [], 2600);
       }
+      flushPendingSync();
     }).catch(function(err){
       SYNC.syncing = false;
       console.warn("同期エラー", err);
       if (opts.manual) showToast("同期できなかったぞう(通信エラー)", [], 2600);
+      flushPendingSync();
     });
   }
 
   // サーバーのマージ結果でローカルを置き換えて保存・再描画する
+  // 同期中に溜まった変更を送り直す。捨てるとその変更は二度と送られない。
+  function flushPendingSync(){
+    if (!SYNC.pendingSync) return;
+    SYNC.pendingSync = false;
+    scheduleSync();
+  }
+
   function applySyncResult(json){
     SYNC.applyingRemote = true;
+    // dictsはローカル側もサーバー形式に直してから同じ土俵でマージする
+    var localDicts = dictsFromLocal();
     try {
-      S.data.items = Array.isArray(json.items) ? json.items : [];
-      S.data.shopping = Array.isArray(json.shopping) ? json.shopping : [];
-      applyDictsToLocal(Array.isArray(json.dicts) ? json.dicts : []);
+      S.data.items = mergeRemoteRecords(S.data.items, json.items, function(r){ return r.id; });
+      S.data.shopping = mergeRemoteRecords(S.data.shopping, json.shopping, function(r){ return r.id; });
+      applyDictsToLocal(mergeRemoteRecords(localDicts, json.dicts, function(r){ return r.kind + "|" + r.key; }));
       persist(S.data);
     } finally {
       SYNC.applyingRemote = false;
