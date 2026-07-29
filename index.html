@@ -15,8 +15,27 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1〜4 (v0.5.1)
+     あるぞう Phase 1〜4 (v0.6.0)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA。
+     v0.6.0: Phase 4「マイ料理」を追加。よく作る料理をレシピ(S.data.recipes、材料は名前で保持)として
+     登録しておき、「作った」1操作で材料を一括消費できる。レシート取り込み(候補を確認して足す)と
+     対になる「消費=候補を確認して引く」機能で、必ず確認画面を挟む。
+     ・冷蔵庫タブ上部に「🍳 マイ料理」ボタンを新設(買い物リストの「🧾レシート取り込み」と対称の位置づけ)。
+       レシピ一覧→登録/編集(名前・絵文字・材料。材料は在庫/よく買うものから選ぶか手入力、
+       個数ものは数量・残量ものは「使う」フラグのみ)→タップで「作った」確認画面、の3ビューを
+       1つのシート(S.recipeView: list|edit|cook)内で切り替える。
+     ・確認画面(核心)は材料ごとに現在の実在庫(cat:"fridge"限定、findFridgeItemByName)と突き合わせ、
+       個数ものは「足りる/在庫◯個です◯個だけ消費(自動で切り下げ)/在庫にありません(スキップ)」を判定し
+       消費数ステッパー+行ごとのON/OFFを提供、残量ものは「そのまま/1段階減った/使い切った」の3択(既定
+       そのまま)を提供する。★在庫はマイナスにしない(消費数は在庫数を上限にクランプ)のが絶対条件。
+       確定(つかったぞう)前に pushUndo() を1回だけ呼び、個数0到達時は consumeItem 同様に
+       tombstone化+addToShoppingIfNotExists、残量は tapGauge のルール(1以下で買い物リストへ自動追加)
+       と整合させる。全材料がスキップ(操作対象なし)なら確定ボタンを無効化する。
+     ・EMOJI_GROUPSに「料理」グループを追加(🍛🍜🍚🥘等、レシピの絵文字ピッカー用)。
+     ・同期: recipesシートに対応(サーバー側は既存)。ingredientsは1セルに入れるため送信時に
+       JSON.stringify、受信時にJSON.parseして配列へ戻す(recipesForSync/applyRecipesToLocal)。
+       他のレコードと同じくmergeRemoteRecords()でupdatedAt比較マージ。json.recipesが無い
+       (古いサーバー)場合もmergeRemoteRecordsが空配列として扱うため落ちない。
      v0.5.1: 🐛同期の重大バグ修正「消費してもすぐ元に戻る」。原因は2つで、
      (1) runSync が同期中の要求を `if (SYNC.syncing) return;` で捨てていたため、POSTの往復中
          (数秒)に行った操作がサーバーへ永久に届かなかった → SYNC.pendingSync に覚えて
@@ -91,6 +110,9 @@
        dict:     { <名前>: {emoji, type, cat, dept, updatedAt} },  // 学習辞書
        receiptDict: { <正規化キー>: {name,emoji,type,cat,dept,updatedAt} または {ignore:true,updatedAt} } // レシート取り込みの学習辞書
        favorites: { fridge:[{name,emoji,type,dept,updatedAt,deleted}], daily:[...], pet:[...] } // よく買うもの(削除もtombstone)
+       recipes:  [{ id, name, emoji, ingredients:[{name, qty, type:'count'|'gauge'}], updatedAt, deleted }]
+                  // マイ料理(Phase 4)。材料はアイテムIDではなく「名前」で持つ(在庫は使い切ると
+                  // 削除されるためID参照だと壊れる)。qtyはtype:'count'のときのみ使う。
      }
      Phase 2同期(任意機能・localStorage key: "aruzou-sync-v1")
      { url, token, enabled } — GAS Web AppのURLと合言葉。設定シート(🐘長押し/買い物リスト下部)で入力。
@@ -518,6 +540,62 @@
   .sync-status.ok{ color:#3E8A5C; font-weight:700; }
   .sync-status.ng{ color:var(--danger); font-weight:700; }
   .sync-hint{ font-size:11.5px; color:var(--sub); line-height:1.5; }
+
+  /* ── マイ料理(Phase 4) ── */
+  .recipe-btn{
+    width:100%; padding:12px 0; margin-bottom:14px; border-radius:14px;
+    border:1px dashed var(--border-strong); background:#FFF9F0; color:var(--main-dark);
+    font-weight:700; font-size:14px; cursor:pointer;
+  }
+  .sheet-back{ border:none; background:none; font-size:20px; color:var(--sub2); cursor:pointer; padding:2px 8px; }
+  .recipe-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .recipe-card{ position:relative; }
+  .recipe-card-main{
+    width:100%; display:flex; flex-direction:column; align-items:center; gap:4px; padding:14px 4px 10px;
+    border-radius:14px; border:1px solid var(--border); background:#FFF; cursor:pointer; font-family:inherit; min-height:44px;
+  }
+  .recipe-card-emoji{ font-size:30px; line-height:1; }
+  .recipe-card-name{ font-size:12px; font-weight:700; color:var(--text); text-align:center; word-break:break-all; }
+  .recipe-card-edit{
+    position:absolute; top:-6px; right:-6px; width:26px; height:26px; border-radius:50%;
+    background:var(--section-bg); border:1px solid var(--border-strong); color:var(--main-dark);
+    font-size:12px; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;
+  }
+  .recipe-pick-grid{ display:flex; flex-wrap:wrap; gap:6px; }
+  .recipe-pick-chip{
+    display:flex; align-items:center; gap:4px; padding:7px 10px; border-radius:20px;
+    border:1px solid var(--border); background:#FFF; font-size:12.5px; font-weight:600; color:var(--text);
+    cursor:pointer; font-family:inherit;
+  }
+  .recipe-pick-empty{ font-size:12px; color:var(--sub); }
+  .recipe-ing-add-row{ display:flex; gap:8px; }
+  .recipe-ing-list{ display:flex; flex-direction:column; gap:8px; }
+  .recipe-ing-row{
+    display:flex; align-items:center; gap:8px; border:1px solid var(--border); border-radius:12px;
+    padding:8px 10px; background:#FFF; flex-wrap:wrap;
+  }
+  .recipe-ing-name{ flex:1; min-width:70px; font-size:14px; font-weight:700; color:var(--text); }
+  .recipe-ing-seg{ flex:none; width:112px; }
+  .recipe-ing-seg .seg-btn{ padding:7px 0; font-size:11.5px; min-height:34px; }
+  .recipe-ing-gauge-label{ font-size:12px; color:var(--sub2); font-weight:700; padding:0 4px; }
+
+  /* ── 「作った」確認画面 ── */
+  .cook-summary{ font-size:12.5px; color:var(--sub2); }
+  .cook-row{
+    border:1px solid var(--border); border-radius:14px; padding:10px 12px; margin-bottom:10px; background:#FFF;
+  }
+  .cook-row.missing{ opacity:.55; }
+  .cook-row.short{ border-color:var(--accent); background:#FFFBF0; }
+  .cook-row-top{ display:flex; align-items:center; gap:8px; }
+  .cook-row-emoji{
+    width:32px; height:32px; border-radius:9px; background:var(--section-bg);
+    display:flex; align-items:center; justify-content:center; font-size:19px; flex:none;
+  }
+  .cook-row-name{ flex:1; min-width:0; font-size:14.5px; font-weight:700; color:var(--text); }
+  .cook-row-msg{ font-size:12px; color:var(--sub2); margin:4px 0 8px 42px; line-height:1.5; }
+  .cook-row-msg.short{ color:var(--main-dark); font-weight:700; }
+  .cook-row-msg.missing{ color:var(--sub); }
+  .cook-row-ctrl{ margin-left:42px; }
 </style>
 </head>
 <body>
@@ -649,6 +727,9 @@
     ] },
     { label:"野菜室", items:["🧅","🥕","🥔","🥬",":cabbage:","🍅","🥒","🍆","🫑","🥦","🍄","🥑","🍎","🍌","🍊"] },
     { label:"冷凍", items:["🍚","🍜"] },
+    // マイ料理(Phase 4)のレシピ絵文字ピッカー用。他グループと絵文字が重複してもピッカー上に
+    // 両方出るだけで実害は無いため、料理として自然な見た目を優先して選んでいる。
+    { label:"料理", items:["🍛","🍲","🥘","🍳","🍱","🍙","🍝","🥗","🍕","🌮"] },
     { label:"🧴 日用品", items:["🧻","🧴","🧼","🪥","🧺","🧽"] },
     { label:":ryukusaku: リュクサク", items:["🥫","🦴"] },
     { label:"そのほか", items:["📦","🛒"] }
@@ -747,6 +828,13 @@
     if (!d.dict || typeof d.dict !== "object") d.dict = {};
     if (!d.receiptDict || typeof d.receiptDict !== "object") d.receiptDict = {};
     if (!d.favorites || typeof d.favorites !== "object") d.favorites = {};
+    if (!Array.isArray(d.recipes)) d.recipes = []; // マイ料理(Phase 4)。既存データとの互換を壊さないよう無ければ空配列で初期化する
+    // recipesは新設フィールドなのでmigrateSyncFields(1回きり)を待たず、読み込みのたびに
+    // updatedAt/deletedの欠落だけ補っておく(壊れた/古い同期データが来ても落ちないための安全網)。
+    d.recipes.forEach(function(r){
+      if (r && typeof r.updatedAt !== "number") r.updatedAt = Date.now();
+      if (r && typeof r.deleted !== "boolean") r.deleted = false;
+    });
     if (!d.migrations || typeof d.migrations !== "object") d.migrations = {};
     // 「よく買うもの」はPRESETSを初期値としてstate化している。無ければ既定値をコピーして初期化する(1回きり)。
     ["fridge", "daily", "pet"].forEach(function(cat){
@@ -885,6 +973,11 @@
     settingsForm: null,       // { url, token, enabled } 編集中の値
     settingsTestResult: null, // 接続テストの結果 { ok, msg } または null
     settingsBusy: false,      // 接続テスト/今すぐ同期の実行中フラグ(ボタン多重防止)
+    recipeOpen: false,        // マイ料理シート(Phase 4)の開閉
+    recipeView: "list",       // list(一覧) | edit(登録・編集) | cook(「作った」確認)
+    recipeForm: null,         // 編集中のレシピ { id(新規はnull), name, emoji, ingredients:[{name,qty,type}] }
+    recipeIngredientInput: "",// 材料の手入力欄
+    cookForm: null,           // 「作った」確認中の状態 { recipeId, name, emoji, rows:[...] }(buildCookForm参照)
   };
   var undoSnapshot = null; // 直前の1操作分のデータスナップショット(JSON文字列)
   var toastTimer = null;
@@ -1072,6 +1165,7 @@
     };
     S.addOpen = true;
     S.favoritesEditMode = false;
+    S.recipeOpen = false;
     render();
   }
   function closeAddSheet(){ S.addOpen = false; S.addForm = null; S.favoritesEditMode = false; render(); }
@@ -1430,6 +1524,7 @@
     S.receiptEmojiOpenIdx = null;
     S.addOpen = false;
     S.editingId = null;
+    S.recipeOpen = false;
     render();
   }
   function closeReceiptSheet(){
@@ -1645,7 +1740,8 @@
         token: cfg.token,
         items: S.data.items,
         shopping: S.data.shopping,
-        dicts: dictsFromLocal()
+        dicts: dictsFromLocal(),
+        recipes: recipesForSync()
       });
     } catch (e) {
       SYNC.syncing = false;
@@ -1683,12 +1779,15 @@
 
   function applySyncResult(json){
     SYNC.applyingRemote = true;
-    // dictsはローカル側もサーバー形式に直してから同じ土俵でマージする
+    // dicts/recipesはローカル側もサーバー形式に直してから同じ土俵でマージする
     var localDicts = dictsFromLocal();
+    var localRecipes = recipesForSync();
     try {
       S.data.items = mergeRemoteRecords(S.data.items, json.items, function(r){ return r.id; });
       S.data.shopping = mergeRemoteRecords(S.data.shopping, json.shopping, function(r){ return r.id; });
       applyDictsToLocal(mergeRemoteRecords(localDicts, json.dicts, function(r){ return r.kind + "|" + r.key; }));
+      // json.recipesが無い(recipes未対応の古いサーバー)場合もmergeRemoteRecordsが空配列扱いするため落ちない
+      S.data.recipes = applyRecipesToLocal(mergeRemoteRecords(localRecipes, json.recipes, function(r){ return r.id; }));
       persist(S.data);
     } finally {
       SYNC.applyingRemote = false;
@@ -1705,6 +1804,7 @@
     S.addOpen = false;
     S.editingId = null;
     S.receiptOpen = false;
+    S.recipeOpen = false;
     render();
   }
   function closeSettingsSheet(){
@@ -1770,6 +1870,241 @@
     runSync({ manual:true });
     // runSync自体は非同期でトースト表示するため、ボタンのbusy状態は簡易に少し後で解除する
     setTimeout(function(){ S.settingsBusy = false; render(); }, 1200);
+  }
+
+  // ─────────────────────────────────────────
+  // マイ料理(Phase 4): レシピ登録・「作った」一括消費
+  // ─────────────────────────────────────────
+  // 材料は名前で持つため、消費時はcat:"fridge"限定・名前一致で現在の実在庫と突き合わせる
+  // (削除済みtombstoneは除外)。日用品/リュクサクの同名アイテムを誤って拾わないようcat限定にする。
+  function findFridgeItemByName(name){
+    var items = S.data.items;
+    for (var i = 0; i < items.length; i++){
+      if (items[i].cat === "fridge" && items[i].name === name && !items[i].deleted) return items[i];
+    }
+    return null;
+  }
+
+  // 削除済み(tombstone)を除いたレシピ一覧
+  function activeRecipes(){
+    return (S.data.recipes || []).filter(function(r){ return !r.deleted; });
+  }
+
+  function openRecipeSheet(){
+    S.recipeOpen = true;
+    S.recipeView = "list";
+    S.recipeForm = null;
+    S.recipeIngredientInput = "";
+    S.cookForm = null;
+    S.addOpen = false;
+    S.editingId = null;
+    S.receiptOpen = false;
+    S.settingsOpen = false;
+    render();
+  }
+  function closeRecipeSheet(){
+    S.recipeOpen = false;
+    S.recipeView = "list";
+    S.recipeForm = null;
+    S.recipeIngredientInput = "";
+    S.cookForm = null;
+    render();
+  }
+  // シートは閉じずに一覧ビューへ戻る(登録/編集/確認画面の「戻る」用)
+  function backToRecipeList(){
+    S.recipeView = "list";
+    S.recipeForm = null;
+    S.recipeIngredientInput = "";
+    S.cookForm = null;
+    render();
+  }
+
+  function openRecipeNewForm(){
+    S.recipeForm = { id:null, name:"", emoji:"🍳", ingredients:[] };
+    S.recipeIngredientInput = "";
+    S.recipeView = "edit";
+    render();
+  }
+  function openRecipeEditForm(id){
+    var r = null;
+    for (var i = 0; i < S.data.recipes.length; i++){
+      if (S.data.recipes[i].id === id && !S.data.recipes[i].deleted) { r = S.data.recipes[i]; break; }
+    }
+    if (!r) return;
+    S.recipeForm = { id:r.id, name:r.name, emoji:r.emoji, ingredients: JSON.parse(JSON.stringify(r.ingredients || [])) };
+    S.recipeIngredientInput = "";
+    S.recipeView = "edit";
+    render();
+  }
+
+  // 材料を1件追加する(同名の二重追加は無視)。個数ものは既定qty=1、残量ものはqtyを使わないので0。
+  function recipeAddIngredient(name, type){
+    var f = S.recipeForm;
+    if (!f) return;
+    var nm = String(name || "").trim();
+    if (!nm) return;
+    if (f.ingredients.some(function(ing){ return ing.name === nm; })) return;
+    var t = type === "gauge" ? "gauge" : "count";
+    f.ingredients.push({ name:nm, qty: t === "count" ? 1 : 0, type:t });
+  }
+
+  function saveRecipeForm(){
+    var f = S.recipeForm;
+    if (!f) return;
+    var name = (f.name || "").trim();
+    if (!name || !f.ingredients.length) return; // 名前必須・材料は1つ以上必須
+    var emoji = (f.emoji || "").trim() || "🍳";
+    var ingredients = f.ingredients.map(function(ing){
+      return { name: ing.name, type: ing.type, qty: ing.type === "count" ? Math.max(1, Number(ing.qty) || 1) : 0 };
+    });
+    var now = Date.now();
+    if (f.id) {
+      var r = null;
+      for (var i = 0; i < S.data.recipes.length; i++){ if (S.data.recipes[i].id === f.id) { r = S.data.recipes[i]; break; } }
+      if (r) {
+        r.name = name; r.emoji = emoji; r.ingredients = ingredients; r.updatedAt = now;
+      }
+    } else {
+      S.data.recipes.push({ id:newId(), name:name, emoji:emoji, ingredients:ingredients, updatedAt:now, deleted:false });
+    }
+    persist(S.data);
+    backToRecipeList();
+    showToast("とうろくしたぞう", [], 2000);
+  }
+
+  // レシピ削除もtombstone方式(deleted:true + updatedAt更新)。他レコードと同じくUndo対応。
+  function deleteRecipe(id){
+    var r = null;
+    for (var i = 0; i < S.data.recipes.length; i++){
+      if (S.data.recipes[i].id === id && !S.data.recipes[i].deleted) { r = S.data.recipes[i]; break; }
+    }
+    if (!r) return;
+    pushUndo();
+    r.deleted = true;
+    r.updatedAt = Date.now();
+    persist(S.data);
+    backToRecipeList();
+    showToast("けしたぞう", [{ label:"もどす", action:"toast-undo" }], 3000);
+  }
+
+  // 材料名から絵文字を推定する(在庫アイテム→食材学習辞書→内蔵食材辞書→既定)。
+  // 在庫に無い材料でも確認画面に何かしら絵文字を出すためのフォールバック。
+  function guessEmojiForIngredientName(name){
+    var known = S.data.dict[name];
+    if (known && known.emoji) return known.emoji;
+    var fd = FOOD_DICT[name];
+    if (fd && fd.emoji) return fd.emoji;
+    return "🍽";
+  }
+
+  // レシピの材料それぞれを現在の実在庫と突き合わせ、「作った」確認画面の行データを組み立てる。
+  // ★在庫はマイナスにしないため、個数ものの消費数は在庫数(have)を上限にクランプする。
+  function buildCookForm(recipe){
+    var rows = (recipe.ingredients || []).map(function(ing){
+      var it = findFridgeItemByName(ing.name);
+      var mode = it ? it.type : ing.type; // 在庫の実際のtypeを優先(手動で個数⇔残量を変更した場合に追従)
+      var emoji = it ? it.emoji : guessEmojiForIngredientName(ing.name);
+      if (mode === "count") {
+        var need = Math.max(1, Number(ing.qty) || 1);
+        var have = (it && it.type === "count") ? (it.qty || 0) : 0;
+        var missing = !it || it.type !== "count" || have <= 0;
+        return {
+          name: ing.name, emoji: emoji, type: "count",
+          need: need, have: have,
+          consume: missing ? 0 : Math.min(need, have),
+          on: !missing,
+          status: missing ? "missing" : (have < need ? "short" : "ok"),
+          itemId: it ? it.id : null
+        };
+      }
+      var gmissing = !it || it.type !== "gauge";
+      return {
+        name: ing.name, emoji: emoji, type: "gauge",
+        have: gmissing ? 0 : (it.gauge || 0),
+        gaugeChoice: "same", // 既定は「そのまま」(自動では減らさない)
+        status: gmissing ? "missing" : "ok",
+        itemId: it ? it.id : null
+      };
+    });
+    return { recipeId: recipe.id, name: recipe.name, emoji: recipe.emoji, rows: rows };
+  }
+
+  function openRecipeCook(id){
+    var r = null;
+    for (var i = 0; i < S.data.recipes.length; i++){
+      if (S.data.recipes[i].id === id && !S.data.recipes[i].deleted) { r = S.data.recipes[i]; break; }
+    }
+    if (!r) return;
+    S.cookForm = buildCookForm(r);
+    S.recipeView = "cook";
+    render();
+  }
+
+  // その行が実際に消費対象かどうか(確定ボタンの活性判定・一括消費の対象判定の両方で使う)
+  function cookRowActive(row){
+    if (row.status === "missing") return false;
+    if (row.type === "count") return !!row.on && row.consume > 0;
+    return row.gaugeChoice !== "same";
+  }
+  function anyCookRowActive(){
+    return !!(S.cookForm && S.cookForm.rows.some(cookRowActive));
+  }
+
+  // 確定(つかったぞう): 一括消費の前に1回だけpushUndo()する。個数ものが0になったらconsumeItemと
+  // 同様にtombstone化+買い物リストへ自動追加、残量ものはtapGaugeのルール(1以下で自動追加)と揃える。
+  function submitCook(){
+    var cf = S.cookForm;
+    if (!cf || !anyCookRowActive()) return;
+    pushUndo();
+    var now = Date.now();
+    cf.rows.forEach(function(row){
+      if (!cookRowActive(row)) return;
+      if (row.type === "count") {
+        var it = row.itemId ? findItem(row.itemId) : null;
+        if (!it) return;
+        var amount = Math.max(0, Math.min(row.consume, it.qty || 0)); // 念のため二重に在庫超過を防ぐ
+        it.qty = (it.qty || 0) - amount;
+        if (it.qty <= 0) {
+          it.deleted = true;
+          it.updatedAt = now;
+          addToShoppingIfNotExists(it.name, it.emoji, it.cat, it.dept);
+        } else {
+          it.updatedAt = now;
+        }
+      } else {
+        var git = row.itemId ? findItem(row.itemId) : null;
+        if (!git) return;
+        git.gauge = row.gaugeChoice === "empty" ? 0 : Math.max(0, (git.gauge || 0) - 1);
+        git.updatedAt = now;
+        if (git.gauge <= 1) addToShoppingIfNotExists(git.name, git.emoji, git.cat, git.dept);
+      }
+    });
+    persist(S.data);
+    closeRecipeSheet();
+    showToast("つかったぞう", [{ label:"もどす", action:"toast-undo" }], 4000);
+  }
+
+  // ── 同期用: recipes ⇔ サーバー形式(ingredientsは1セルに入れるためJSON文字列)の相互変換 ──
+  function recipesForSync(){
+    return (S.data.recipes || []).map(function(r){
+      var ingStr;
+      try { ingStr = JSON.stringify(r.ingredients || []); } catch (e) { ingStr = "[]"; }
+      return { id:r.id, name:r.name || "", emoji:r.emoji || "", ingredients:ingStr, updatedAt:r.updatedAt || Date.now(), deleted: !!r.deleted };
+    });
+  }
+  // サーバー形式(ingredientsが文字列)からローカル形式(配列)へ戻す。パース失敗時は空配列にして
+  // 落とさない(壊れたデータでアプリごと止まらないようにする)。
+  function applyRecipesToLocal(list){
+    return (list || []).map(function(r){
+      var ingredients = [];
+      if (typeof r.ingredients === "string") {
+        try { ingredients = JSON.parse(r.ingredients) || []; } catch (e) { ingredients = []; }
+      } else if (Array.isArray(r.ingredients)) {
+        ingredients = r.ingredients; // 念のため既に配列で来た場合もそのまま受け付ける
+      }
+      if (!Array.isArray(ingredients)) ingredients = [];
+      return { id:r.id, name:r.name || "", emoji:r.emoji || "", ingredients:ingredients, updatedAt:r.updatedAt || Date.now(), deleted: !!r.deleted };
+    });
   }
 
   // ─────────────────────────────────────────
@@ -1878,8 +2213,11 @@
   function renderStockTab(cat){
     var items = S.data.items.filter(function(it){ return it.cat === cat && !it.deleted; });
     var addBtn = '<button class="add-btn" data-action="open-add">＋ 追加</button>';
+    // マイ料理(Phase 4)の入口。買い物リストタブの「🧾レシート取り込み」と対称の位置づけで
+    // 冷蔵庫タブの上部にのみ置く(材料の突き合わせがcat:"fridge"限定のため)。
+    var recipeBtn = cat === "fridge" ? '<button class="recipe-btn" data-action="recipe-open">🍳 マイ料理</button>' : '';
     if (!items.length) {
-      return '<div class="tab-body">' + addBtn + emptyStateHtml("なんにもないぞう…") + '</div>';
+      return '<div class="tab-body">' + recipeBtn + addBtn + emptyStateHtml("なんにもないぞう…") + '</div>';
     }
     var sections = "";
     if (cat === "pet") {
@@ -1905,7 +2243,7 @@
         '</div>';
       });
     }
-    return '<div class="tab-body">' + addBtn + sections + '</div>';
+    return '<div class="tab-body">' + recipeBtn + addBtn + sections + '</div>';
   }
 
   function renderShoppingRow(s){
@@ -2220,6 +2558,175 @@
   }
 
   // ─────────────────────────────────────────
+  // 描画: マイ料理シート(Phase 4)
+  // ─────────────────────────────────────────
+  function renderRecipeListHtml(){
+    var recipes = activeRecipes();
+    var addBtn = '<button class="add-btn" data-action="recipe-add-new">＋ 新しい料理</button>';
+    if (!recipes.length) {
+      return '<div class="sheet-body">' + addBtn + emptyStateHtml("まだ料理がないぞう") + '</div>';
+    }
+    var grid = recipes.map(function(r){
+      return '<div class="recipe-card">' +
+        '<button class="recipe-card-main" data-action="recipe-cook-open" data-id="' + r.id + '">' +
+          '<span class="recipe-card-emoji">' + emojiHTML(r.emoji, 'ce-32') + '</span>' +
+          '<span class="recipe-card-name">' + esc(r.name) + '</span>' +
+        '</button>' +
+        '<button class="recipe-card-edit" data-action="recipe-edit-open" data-id="' + r.id + '" title="編集">✎</button>' +
+      '</div>';
+    }).join('');
+    return '<div class="sheet-body">' + addBtn + '<div class="recipe-grid">' + grid + '</div></div>';
+  }
+
+  // 材料ピッカー1件分のチップ(在庫アイテム or よく買うもの)。data-typeは追加時の既定タイプに使う。
+  function renderRecipeEditHtml(){
+    var f = S.recipeForm;
+    var seen = {};
+    var known = [];
+    S.data.items.filter(function(it){ return it.cat === "fridge" && !it.deleted; }).forEach(function(it){
+      if (!seen[it.name]) { seen[it.name] = true; known.push({ name:it.name, emoji:it.emoji, type:it.type }); }
+    });
+    activeFavorites("fridge").forEach(function(fv){
+      if (!seen[fv.name]) { seen[fv.name] = true; known.push({ name:fv.name, emoji:fv.emoji, type:fv.type }); }
+    });
+    var already = {};
+    f.ingredients.forEach(function(ing){ already[ing.name] = true; });
+    var pickList = known.filter(function(k){ return !already[k.name]; });
+    var pickHtml = pickList.length
+      ? pickList.map(function(k){
+          return '<button class="recipe-pick-chip" data-action="recipe-ing-add-known" data-name="' + esc(k.name) + '" data-type="' + esc(k.type) + '">' +
+            emojiHTML(k.emoji, 'ce-18') + '<span>' + esc(k.name) + '</span></button>';
+        }).join('')
+      : '<div class="recipe-pick-empty">冷蔵庫の在庫・よく買うものが無いぞう。下から手入力してね</div>';
+
+    var ingListHtml = f.ingredients.length
+      ? f.ingredients.map(function(ing, idx){
+          var ctrl = ing.type === "count"
+            ? '<div class="stepper"><button class="stepper-btn" data-action="recipe-ing-qty-delta" data-idx="' + idx + '" data-delta="-1">−</button>' +
+                '<span class="stepper-val">' + ing.qty + '</span>' +
+                '<button class="stepper-btn" data-action="recipe-ing-qty-delta" data-idx="' + idx + '" data-delta="1">＋</button></div>'
+            : '<span class="recipe-ing-gauge-label">使う</span>';
+          return '<div class="recipe-ing-row">' +
+            '<span class="recipe-ing-name">' + esc(ing.name) + '</span>' +
+            '<div class="segmented recipe-ing-seg">' +
+              '<button class="seg-btn' + (ing.type === "count" ? ' active' : '') + '" data-action="recipe-ing-set-type" data-idx="' + idx + '" data-type="count">個数</button>' +
+              '<button class="seg-btn' + (ing.type === "gauge" ? ' active' : '') + '" data-action="recipe-ing-set-type" data-idx="' + idx + '" data-type="gauge">残量</button>' +
+            '</div>' +
+            ctrl +
+            '<button class="x-btn" data-action="recipe-ing-remove" data-idx="' + idx + '">×</button>' +
+          '</div>';
+        }).join('')
+      : emptyStateHtml("材料をえらんでね");
+
+    return '' +
+      '<div class="sheet-body">' +
+        '<div class="sheet-label">名前</div>' +
+        '<input class="field" type="text" placeholder="料理の名前" data-field="recipe-name" value="' + esc(f.name) + '">' +
+        '<div class="sheet-label">絵文字</div>' +
+        '<input class="field emoji-input" type="text" placeholder="絵文字を入力 または下から選択" data-field="recipe-emoji-custom" value="' + esc(f.emoji) + '">' +
+        renderEmojiGroupsHtml(f.emoji, "recipe-set-emoji") +
+        '<div class="sheet-label">材料(在庫・よく買うものから選ぶ)</div>' +
+        '<div class="recipe-pick-grid">' + pickHtml + '</div>' +
+        '<div class="recipe-ing-add-row">' +
+          '<input class="field" type="text" placeholder="材料名を手入力" data-field="recipe-ing-input" value="' + esc(S.recipeIngredientInput || '') + '">' +
+          '<button class="add-btn small" data-action="recipe-ing-add-custom">＋</button>' +
+        '</div>' +
+        '<div class="sheet-label">えらんだ材料</div>' +
+        '<div class="recipe-ing-list">' + ingListHtml + '</div>' +
+      '</div>' +
+      '<div class="sheet-actions">' +
+        (f.id ? '<button class="delete-link" data-action="recipe-delete">削除</button>' : '') +
+        '<button class="btn-primary" data-action="recipe-save"' + (f.ingredients.length ? '' : ' disabled') + '>保存</button>' +
+      '</div>';
+  }
+
+  // 「作った」確認画面の1材料分。個数ものは在庫との突き合わせ結果(ok/short/missing)を文言で明示し、
+  // 残量ものは3択(そのまま/1段階減った/使い切った)をワンタップで選ばせる。
+  function renderCookRowHtml(row, idx){
+    var toggleOn = row.type === "count" && row.status !== "missing" && row.on;
+    var toggleHtml = row.type === "count"
+      ? '<button class="receipt-toggle' + (toggleOn ? ' on' : '') + '" data-action="cook-toggle-on" data-idx="' + idx + '"' +
+          (row.status === "missing" ? ' disabled' : '') + '>' + (toggleOn ? '✓' : '') + '</button>'
+      : '<span class="receipt-toggle' + (row.status !== "missing" && row.gaugeChoice !== "same" ? ' on' : '') + '">' +
+          (row.status !== "missing" && row.gaugeChoice !== "same" ? '✓' : '') + '</span>';
+
+    var msg;
+    if (row.status === "missing") {
+      msg = esc(row.name) + ' → 在庫にありません（スキップ）';
+    } else if (row.type === "count") {
+      msg = row.status === "short"
+        ? esc(row.name) + ' ×' + row.need + ' → 在庫' + row.have + '個です。' + row.have + '個だけ消費'
+        : esc(row.name) + ' ×' + row.need + ' → 在庫' + row.have + '個';
+    } else {
+      var gLabel = row.have === 3 ? "たっぷり" : row.have === 2 ? "半分" : row.have === 1 ? "少ない" : "なし";
+      msg = esc(row.name) + ' → 在庫「' + gLabel + '」';
+    }
+
+    var ctrl = "";
+    if (row.status !== "missing") {
+      if (row.type === "count") {
+        ctrl = '<div class="cook-row-ctrl"><div class="stepper">' +
+          '<button class="stepper-btn" data-action="cook-consume-delta" data-idx="' + idx + '" data-delta="-1">−</button>' +
+          '<span class="stepper-val">' + row.consume + '</span>' +
+          '<button class="stepper-btn" data-action="cook-consume-delta" data-idx="' + idx + '" data-delta="1">＋</button>' +
+        '</div></div>';
+      } else {
+        var opts = [{ v:"same", l:"そのまま" }, { v:"one", l:"1段階減った" }, { v:"empty", l:"使い切った" }];
+        ctrl = '<div class="cook-row-ctrl"><div class="gauge-select">' + opts.map(function(o){
+          return '<button class="gauge-opt' + (row.gaugeChoice === o.v ? ' active' : '') + '" data-action="cook-gauge-choice" data-idx="' + idx + '" data-choice="' + o.v + '">' + o.l + '</button>';
+        }).join('') + '</div></div>';
+      }
+    }
+
+    return '<div class="cook-row ' + row.status + '">' +
+      '<div class="cook-row-top">' +
+        toggleHtml +
+        '<span class="cook-row-emoji">' + emojiHTML(row.emoji, 'ce-20') + '</span>' +
+        '<span class="cook-row-name">' + esc(row.name) + '</span>' +
+      '</div>' +
+      '<div class="cook-row-msg ' + row.status + '">' + msg + '</div>' +
+      ctrl +
+    '</div>';
+  }
+
+  function renderRecipeCookHtml(){
+    var cf = S.cookForm;
+    if (!cf) return '';
+    var rowsHtml = cf.rows.map(function(row, idx){ return renderCookRowHtml(row, idx); }).join('');
+    var active = anyCookRowActive();
+    return '' +
+      '<div class="sheet-body">' +
+        '<div class="cook-summary">材料をたしかめて、消費する分をきめてね</div>' +
+        rowsHtml +
+      '</div>' +
+      '<div class="sheet-actions">' +
+        '<button class="btn-primary" data-action="cook-confirm"' + (active ? '' : ' disabled') + '>つかったぞう</button>' +
+      '</div>';
+  }
+
+  function renderRecipeSheet(){
+    var titleHtml;
+    if (S.recipeView === "edit") titleHtml = esc((S.recipeForm && S.recipeForm.id) ? "料理を編集" : "あたらしい料理");
+    else if (S.recipeView === "cook") titleHtml = S.cookForm ? (emojiHTML(S.cookForm.emoji, 'ce-20') + ' ' + esc(S.cookForm.name)) : "作った";
+    else titleHtml = "🍳 マイ料理";
+    var showBack = S.recipeView !== "list";
+    var body;
+    if (S.recipeView === "edit" && S.recipeForm) body = renderRecipeEditHtml();
+    else if (S.recipeView === "cook" && S.cookForm) body = renderRecipeCookHtml();
+    else body = renderRecipeListHtml();
+    return '' +
+      '<div class="sheet-backdrop" data-action="recipe-close"></div>' +
+      '<div class="sheet">' +
+        '<div class="sheet-head">' +
+          (showBack ? '<button class="sheet-back" data-action="recipe-back">‹</button>' : '<span></span>') +
+          '<span>' + titleHtml + '</span>' +
+          '<button class="sheet-close" data-action="recipe-close">×</button>' +
+        '</div>' +
+        body +
+      '</div>';
+  }
+
+  // ─────────────────────────────────────────
   // 全体描画
   // ─────────────────────────────────────────
   function render(){
@@ -2246,7 +2753,8 @@
       (S.addOpen && S.addForm ? renderAddSheet() : '') +
       (S.editingId && S.editForm ? renderEditSheet() : '') +
       (S.receiptOpen ? renderReceiptSheet() : '') +
-      (S.settingsOpen && S.settingsForm ? renderSettingsSheet() : '');
+      (S.settingsOpen && S.settingsForm ? renderSettingsSheet() : '') +
+      (S.recipeOpen ? renderRecipeSheet() : '');
 
     var newSheet = app.querySelector(".sheet");
     if (newSheet) newSheet.scrollTop = savedSheetScrollTop;
@@ -2275,6 +2783,9 @@
       }
       case "settings-url": if (S.settingsForm) S.settingsForm.url = el.value; break;
       case "settings-token": if (S.settingsForm) S.settingsForm.token = el.value; break;
+      case "recipe-name": if (S.recipeForm) S.recipeForm.name = el.value; break;
+      case "recipe-emoji-custom": if (S.recipeForm) S.recipeForm.emoji = el.value; break;
+      case "recipe-ing-input": S.recipeIngredientInput = el.value; break;
     }
   }
 
@@ -2336,7 +2847,7 @@
     var action = el.dataset.action;
     switch (action) {
       case "set-tab":
-        S.tab = el.dataset.tab; S.addOpen = false; S.editingId = null; S.receiptOpen = false; S.settingsOpen = false; render(); break;
+        S.tab = el.dataset.tab; S.addOpen = false; S.editingId = null; S.receiptOpen = false; S.settingsOpen = false; S.recipeOpen = false; render(); break;
       case "open-add": openAddSheet(); break;
       case "close-add": closeAddSheet(); break;
       case "close-edit": closeEditSheet(); break;
@@ -2465,6 +2976,75 @@
       }
       case "settings-test": testSyncConnection(); break;
       case "settings-sync-now": syncNow(); break;
+      // ── マイ料理(Phase 4) ──
+      case "recipe-open": openRecipeSheet(); break;
+      case "recipe-close": closeRecipeSheet(); break;
+      case "recipe-back": backToRecipeList(); break;
+      case "recipe-add-new": openRecipeNewForm(); break;
+      case "recipe-edit-open": openRecipeEditForm(el.dataset.id); break;
+      case "recipe-cook-open": openRecipeCook(el.dataset.id); break;
+      case "recipe-delete": if (S.recipeForm) deleteRecipe(S.recipeForm.id); break;
+      case "recipe-save": saveRecipeForm(); break;
+      case "recipe-set-emoji": if (S.recipeForm) { S.recipeForm.emoji = el.dataset.emoji; render(); } break;
+      case "recipe-ing-add-known":
+        recipeAddIngredient(el.dataset.name, el.dataset.type);
+        render();
+        break;
+      case "recipe-ing-add-custom": {
+        var ingName = (S.recipeIngredientInput || "").trim();
+        if (ingName) {
+          var ingKnown = S.data.dict[ingName] || FOOD_DICT[ingName];
+          recipeAddIngredient(ingName, ingKnown ? ingKnown.type : "count");
+          S.recipeIngredientInput = "";
+        }
+        render();
+        break;
+      }
+      case "recipe-ing-remove": {
+        var rmIdx = Number(el.dataset.idx);
+        if (S.recipeForm) S.recipeForm.ingredients.splice(rmIdx, 1);
+        render();
+        break;
+      }
+      case "recipe-ing-qty-delta": {
+        var qIdx = Number(el.dataset.idx);
+        var ing = S.recipeForm && S.recipeForm.ingredients[qIdx];
+        if (ing) ing.qty = Math.max(1, (ing.qty || 1) + Number(el.dataset.delta));
+        render();
+        break;
+      }
+      case "recipe-ing-set-type": {
+        var tIdx = Number(el.dataset.idx);
+        var ing2 = S.recipeForm && S.recipeForm.ingredients[tIdx];
+        if (ing2) {
+          ing2.type = el.dataset.type;
+          ing2.qty = ing2.type === "count" ? Math.max(1, Number(ing2.qty) || 1) : 0;
+        }
+        render();
+        break;
+      }
+      case "cook-toggle-on": {
+        var onIdx = Number(el.dataset.idx);
+        var row1 = S.cookForm && S.cookForm.rows[onIdx];
+        if (row1 && row1.status !== "missing") row1.on = !row1.on;
+        render();
+        break;
+      }
+      case "cook-consume-delta": {
+        var cIdx = Number(el.dataset.idx);
+        var row2 = S.cookForm && S.cookForm.rows[cIdx];
+        if (row2) row2.consume = Math.max(0, Math.min(row2.have, (row2.consume || 0) + Number(el.dataset.delta)));
+        render();
+        break;
+      }
+      case "cook-gauge-choice": {
+        var gIdx = Number(el.dataset.idx);
+        var row3 = S.cookForm && S.cookForm.rows[gIdx];
+        if (row3 && row3.status !== "missing") row3.gaugeChoice = el.dataset.choice;
+        render();
+        break;
+      }
+      case "cook-confirm": submitCook(); break;
     }
   }
 
