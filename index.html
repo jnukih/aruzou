@@ -15,8 +15,16 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1〜4 (v0.7.0)
+     あるぞう Phase 1〜4 (v0.7.1)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA。
+     v0.7.1: 買い物リストが空のときの🐘をchar-worried.png(こまり顔)からchar-thinking.png
+       (考えてる顔、鼻を顎に当てて斜め上を見て思案するポーズ)に差し替え。他の空状態(在庫タブ・
+       マイ料理一覧・材料ピッカー・レシート候補なし)はこまり顔のまま。emptyStateHtml(msg, img)に
+       画像を指定できる第2引数を追加(省略時は従来どおりchar-worried.png、既存呼び出しは無変更)。
+     ・配布確認用に APP_VERSION 定数(冒頭の定数群)を新設し、設定シート(⚙️ 設定(iPhone同期))
+       最下部に「あるぞう v0.7.1」を小さいグレー文字で表示(通常の操作画面には出さない)。
+       Service Workerのキャッシュ名はSW側との非同期メッセージ通信が必要で実装が重くなるため、
+       今回は表示を見送った(バージョン表示のみ)。
      v0.7.0: キャラクター画像(象)を導入し、絵文字🐘の一部を専用イラストに置き換え。
      ・ホーム画面アイコンを icon-180-v3.png / icon-512-v3.png に更新(iOSがアイコンを
        再取得しないことがあるためファイル名を変更。manifest.webmanifestにも512pxエントリを追加)。
@@ -553,6 +561,8 @@
   .sync-status.ok{ color:#3E8A5C; font-weight:700; }
   .sync-status.ng{ color:var(--danger); font-weight:700; }
   .sync-hint{ font-size:11.5px; color:var(--sub); line-height:1.5; }
+  /* 配布確認用バージョン表示。設定シート最下部にだけ小さく控えめに出す(通常画面には出さない) */
+  .settings-version{ font-size:10.5px; color:var(--sub2); text-align:center; padding:10px 18px 14px; }
 
   /* ── マイ料理(Phase 4) ── */
   .recipe-btn{
@@ -621,6 +631,9 @@
   // 定数: カテゴリ・部門・プリセット・絵文字辞書
   // ─────────────────────────────────────────
   var STORAGE_KEY = "aruzou-v1";
+  // 配布した版がjunの端末に反映されているか確認するための表示用バージョン。ここを更新すると
+  // 設定シート最下部の表示も連動する(index.html冒頭のバージョンコメントと値を一致させること)。
+  var APP_VERSION = "0.7.1";
 
   var CAT_LABELS = { fridge:"冷蔵庫", daily:"日用品", pet:"リュクサク" };
   var DEPTS = {
@@ -2125,8 +2138,12 @@
   // ─────────────────────────────────────────
   // 描画: 小物
   // ─────────────────────────────────────────
-  function emptyStateHtml(msg){
-    return '<div class="empty-state"><img class="empty-char-img" src="./char-worried.png" alt="こまり顔のあるぞう" width="112" height="140"><div class="empty-msg">' + esc(msg) + '</div></div>';
+  // img省略時は従来どおりchar-worried.png(こまり顔)。買い物リスト空状態など「考えてる」方が
+  // 自然な箇所ではchar-thinking.pngを呼び出し側から渡す(v0.7.1)。
+  function emptyStateHtml(msg, img){
+    var src = img || "./char-worried.png";
+    var alt = (img === "./char-thinking.png") ? "考えちゅうのあるぞう" : "こまり顔のあるぞう";
+    return '<div class="empty-state"><img class="empty-char-img" src="' + src + '" alt="' + alt + '" width="112" height="140"><div class="empty-msg">' + esc(msg) + '</div></div>';
   }
 
   // idxを渡すと data-idx 属性を付ける(レシート候補など、配列インデックスで対象を特定する場合用)
@@ -2283,7 +2300,7 @@
     var settingsLink = '<button class="settings-entry" data-action="settings-open">⚙️ 設定(iPhone同期)</button>';
 
     if (!list.length) {
-      return '<div class="tab-body">' + receiptBtn + inputRow + emptyStateHtml("かうものはないぞう！") + settingsLink + '</div>';
+      return '<div class="tab-body">' + receiptBtn + inputRow + emptyStateHtml("かうものはないぞう！", "./char-thinking.png") + settingsLink + '</div>';
     }
 
     function groupKey(cat, dept){ return (cat || "none") + "|" + (dept || "none"); }
@@ -2572,6 +2589,7 @@
           '<button class="btn-outline" data-action="settings-test"' + (busy ? ' disabled' : '') + '>接続テスト</button>' +
           '<button class="btn-primary" data-action="settings-sync-now"' + (busy ? ' disabled' : '') + '>今すぐ同期</button>' +
         '</div>' +
+        '<div class="settings-version">あるぞう v' + esc(APP_VERSION) + '</div>' +
       '</div>';
   }
 
