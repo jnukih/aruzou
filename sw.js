@@ -1,7 +1,10 @@
 // あるぞう Service Worker
 // 自分自身のファイル一式をキャッシュし、cache-firstで返す(オフラインでも開ける)。
 // 更新を配布したい時はここのバージョンを上げる(例: 'aruzou-v2')だけでよい。
-var CACHE = "aruzou-v13";
+var CACHE = "aruzou-v14";
+// jnukih.github.io は複数アプリを配信していてCache Storageはオリジン共通なので、
+// activateで削除するのは自分(あるぞう)のキャッシュだけに限定する
+var CACHE_PREFIX = "aruzou-";
 
 var ASSETS = [
   "./",
@@ -25,7 +28,7 @@ self.addEventListener("activate", function(event){
   event.waitUntil(
     caches.keys().then(function(keys){
       return Promise.all(
-        keys.filter(function(k){ return k !== CACHE; }).map(function(k){ return caches.delete(k); })
+        keys.filter(function(k){ return k.indexOf(CACHE_PREFIX) === 0 && k !== CACHE; }).map(function(k){ return caches.delete(k); })
       );
     }).then(function(){ return self.clients.claim(); })
   );
