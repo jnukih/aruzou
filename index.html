@@ -11,12 +11,22 @@
 <meta name="theme-color" content="#FFF8EF">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="apple-touch-icon" href="./icon-180-v2.png">
+<link rel="apple-touch-icon" href="./icon-180-v3.png">
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1〜4 (v0.6.0)
+     あるぞう Phase 1〜4 (v0.7.0)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA。
+     v0.7.0: キャラクター画像(象)を導入し、絵文字🐘の一部を専用イラストに置き換え。
+     ・ホーム画面アイコンを icon-180-v3.png / icon-512-v3.png に更新(iOSがアイコンを
+       再取得しないことがあるためファイル名を変更。manifest.webmanifestにも512pxエントリを追加)。
+     ・空状態(在庫0/買い物リスト空/マイ料理なし)の🐘 → char-worried.png(こまり顔、高さ140px)。
+     ・完了トースト(レシート取り込み確定・マイ料理の一括消費・手動同期「そろえたぞう」)に
+       char-joy.png(よろこび、高さ22px)を小さく添える。個別の1個消費トーストには付けない
+       (「やりすぎない」方針、毎回出る操作には出さない)。
+     ・ヘッダータイトル横の🐘 → char-normal.png(通常の立ち姿、高さ26px)。長押しで設定シートを
+       開く隠し入口の当たり判定はimg要素にそのまま引き継ぐ。
+     ・画像はすべて<img>参照(data URI埋め込みはしない。index.htmlの肥大化を避けるため)。
      v0.6.0: Phase 4「マイ料理」を追加。よく作る料理をレシピ(S.data.recipes、材料は名前で保持)として
      登録しておき、「作った」1操作で材料を一括消費できる。レシート取り込み(候補を確認して足す)と
      対になる「消費=候補を確認して引く」機能で、必ず確認画面を挟む。
@@ -168,7 +178,7 @@
     display:flex; align-items:center; gap:8px;
     padding:calc(16px + env(safe-area-inset-top)) 18px 8px;
   }
-  .header-emoji{ font-size:28px; }
+  .header-char-img{ height:26px; width:auto; display:block; cursor:pointer; }
   .header-title{ font-size:21px; font-weight:800; color:var(--main-dark); letter-spacing:1px; }
 
   /* ── 汎用 ── */
@@ -289,8 +299,8 @@
   .fridge-section.dept-veggie .fridge-section-title{ color:#5C8A3A; }
   .fridge-section.dept-condiment .fridge-section-title{ color:#B8823A; }
 
-  .empty-state{ text-align:center; padding:60px 16px 20px; }
-  .empty-emoji{ font-size:58px; margin-bottom:10px; }
+  .empty-state{ text-align:center; padding:40px 16px 20px; }
+  .empty-char-img{ height:140px; width:auto; display:block; margin:0 auto 10px; }
   .empty-msg{ font-size:14.5px; color:var(--sub2); font-weight:700; }
 
   /* ── タブバー(下部固定) ── */
@@ -316,6 +326,9 @@
     box-shadow:0 6px 20px rgba(0,0,0,.25); z-index:40;
   }
   .toast-msg{ font-size:14px; font-weight:700; margin-bottom:6px; }
+  .toast-row{ display:flex; align-items:center; gap:7px; margin-bottom:6px; }
+  .toast-row .toast-msg{ margin-bottom:0; }
+  .toast-char-img{ height:22px; width:auto; flex:0 0 auto; display:block; }
   .toast-actions{ display:flex; gap:8px; }
   .toast-btn{
     flex:1; padding:9px 0; border-radius:10px; border:none;
@@ -998,9 +1011,11 @@
     hideToast();
     showToast("もどしたぞう", [], 2200);
   }
-  function showToast(msg, buttons, duration, data){
+  // img: 完了・成功トーストにだけchar-joy.png等を小さく添える任意パラメータ(「やりすぎない」方針で
+  // 毎回出る個別消費トーストには渡さない。呼び出し側でパスを直接指定する)
+  function showToast(msg, buttons, duration, data, img){
     if (toastTimer) clearTimeout(toastTimer);
-    S.toast = { msg: msg, buttons: buttons || [], data: data || null };
+    S.toast = { msg: msg, buttons: buttons || [], data: data || null, img: img || null };
     render();
     toastTimer = setTimeout(function(){
       S.toast = null;
@@ -1592,7 +1607,7 @@
     });
     persist(S.data);
     closeReceiptSheet();
-    showToast(count + "個いれたぞう", [{ label:"もどす", action:"toast-undo" }], 4000);
+    showToast(count + "個いれたぞう", [{ label:"もどす", action:"toast-undo" }], 4000, null, "./char-joy.png");
   }
 
   // ─────────────────────────────────────────
@@ -1755,7 +1770,7 @@
       SYNC.syncing = false;
       if (json && json.ok) {
         applySyncResult(json);
-        if (opts.manual) showToast("そろえたぞう", [], 2200);
+        if (opts.manual) showToast("そろえたぞう", [], 2200, null, "./char-joy.png");
       } else {
         console.warn("同期に失敗", json && json.error);
         if (opts.manual) showToast("同期できなかったぞう…", [], 2600);
@@ -2081,7 +2096,7 @@
     });
     persist(S.data);
     closeRecipeSheet();
-    showToast("つかったぞう", [{ label:"もどす", action:"toast-undo" }], 4000);
+    showToast("つかったぞう", [{ label:"もどす", action:"toast-undo" }], 4000, null, "./char-joy.png");
   }
 
   // ── 同期用: recipes ⇔ サーバー形式(ingredientsは1セルに入れるためJSON文字列)の相互変換 ──
@@ -2111,7 +2126,7 @@
   // 描画: 小物
   // ─────────────────────────────────────────
   function emptyStateHtml(msg){
-    return '<div class="empty-state"><div class="empty-emoji">🐘</div><div class="empty-msg">' + esc(msg) + '</div></div>';
+    return '<div class="empty-state"><img class="empty-char-img" src="./char-worried.png" alt="こまり顔のあるぞう" width="112" height="140"><div class="empty-msg">' + esc(msg) + '</div></div>';
   }
 
   // idxを渡すと data-idx 属性を付ける(レシート候補など、配列インデックスで対象を特定する場合用)
@@ -2176,10 +2191,10 @@
   // ─────────────────────────────────────────
   // 描画: タブ本体
   // ─────────────────────────────────────────
-  // ヘッダーの🐘は長押しで設定シート(Phase 2 GAS同期)を開ける隠し入口(data-action="header-emoji"、
+  // ヘッダーのキャラ画像(char-normal.png)は長押しで設定シート(Phase 2 GAS同期)を開ける隠し入口(data-action="header-emoji"、
   // 長押し判定はhandlePressStart/handlePressEnd参照)。買い物リスト下部の「⚙️ 設定」からも開ける。
   function renderHeader(){
-    return '<div class="header"><span class="header-emoji" data-action="header-emoji">🐘</span><span class="header-title">あるぞう</span></div>';
+    return '<div class="header"><img class="header-char-img" data-action="header-emoji" src="./char-normal.png" alt="あるぞう" width="21" height="26"><span class="header-title">あるぞう</span></div>';
   }
 
   function renderTabBar(){
@@ -2205,7 +2220,10 @@
     var btns = (S.toast.buttons || []).map(function(b){
       return '<button class="toast-btn" data-action="' + b.action + '">' + esc(b.label) + '</button>';
     }).join('');
-    return '<div class="toast"><div class="toast-msg">' + esc(S.toast.msg) + '</div>' +
+    var msgHtml = S.toast.img
+      ? '<div class="toast-row"><img class="toast-char-img" src="' + S.toast.img + '" alt="よろこぶあるぞう" width="18" height="22"><div class="toast-msg">' + esc(S.toast.msg) + '</div></div>'
+      : '<div class="toast-msg">' + esc(S.toast.msg) + '</div>';
+    return '<div class="toast">' + msgHtml +
       (btns ? '<div class="toast-actions">' + btns + '</div>' : '') +
     '</div>';
   }
@@ -3048,7 +3066,7 @@
     }
   }
 
-  // ヘッダーの🐘長押しで設定シートを開く(隠し入口)。data-action="header-emoji"の要素を
+  // ヘッダーのキャラ画像長押しで設定シートを開く(隠し入口)。data-action="header-emoji"の要素を
   // 押し始めてから650ms後に離さず保持していたら開く。タップ(短押し)では何も起きない。
   var headerLongPressTimer = null;
   function handlePressStart(e){
@@ -3071,7 +3089,7 @@
     app.addEventListener("change", handleChange);
     app.addEventListener("focusout", handleFocusOut);
     app.addEventListener("keydown", handleKeydown);
-    // ヘッダー🐘の長押し検出(touchとmouse両対応。iOS実機はtouch、プレビュー確認はmouseで使う)
+    // ヘッダーのキャラ画像の長押し検出(touchとmouse両対応。iOS実機はtouch、プレビュー確認はmouseで使う)
     app.addEventListener("touchstart", handlePressStart, { passive:true });
     app.addEventListener("touchend", handlePressEnd);
     app.addEventListener("touchcancel", handlePressEnd);
