@@ -15,8 +15,18 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1〜4 (v0.7.1)
+     あるぞう Phase 1〜4 (v0.8.0)
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA。
+     v0.8.0: レシートパーサ(parseReceipt)を全面書き直し。junの実機で「大根」「こくうまキムチ」等が
+       取り込み漏れした件の原因調査で、Live Textの行順が写真によって崩れる(金額が商品名より先に
+       来る・商品コードだけの行が挟まる等)ため、旧方式の「商品名の行→直後の金額行」という
+       順序依存の逐次ペアリングが破綻することが判明。分類(ノイズ/数量注記/確定金額行/曖昧な数字行/
+       商品名)→FIFO突き合わせ、の2段方式に書き直し、行順が入れ替わっても・コード単独行が
+       混ざっても正しく対応付くようにした(isReceiptNoiseLine・RECEIPT_AMBIGUOUS_RE等を新設)。
+     ・ショートカット連携: 起動時にlocation.hashが「#receipt=」で始まっていたら、レシート取り込み
+       シートを自動オープン→貼り付け→「よみとるぞう」まで自動実行し、候補リスト表示まで進める
+       (applyReceiptShortcut。iOSショートカットで撮影→テキスト認識→このURLを開く、を想定)。
+       クエリではなくハッシュを使うのは、サーバーへ送信されずログにレシート内容が残らないため。
      v0.7.1: 買い物リストが空のときの🐘をchar-worried.png(こまり顔)からchar-thinking.png
        (考えてる顔、鼻を顎に当てて斜め上を見て思案するポーズ)に差し替え。他の空状態(在庫タブ・
        マイ料理一覧・材料ピッカー・レシート候補なし)はこまり顔のまま。emptyStateHtml(msg, img)に
@@ -633,7 +643,7 @@
   var STORAGE_KEY = "aruzou-v1";
   // 配布した版がjunの端末に反映されているか確認するための表示用バージョン。ここを更新すると
   // 設定シート最下部の表示も連動する(index.html冒頭のバージョンコメントと値を一致させること)。
-  var APP_VERSION = "0.7.1";
+  var APP_VERSION = "0.8.0";
 
   var CAT_LABELS = { fridge:"冷蔵庫", daily:"日用品", pet:"リュクサク" };
   var DEPTS = {
@@ -778,14 +788,18 @@
     "🥫":"ドライフード", "🦴":"おやつ"
   };
 
-  // レシート取り込み(Phase 3)用の判定パターン。
-  // 割引/値引は行自体と直後の金額行の両方を捨て、レジ袋はその行だけ捨てる。
-  // 小計以降のキーワードが出た行以降は完全に無視する(打ち切り)。
-  var RECEIPT_DISCOUNT_WORDS = ["★割引", "値引"];
-  var RECEIPT_SKIP_WORDS = ["レジ袋"];
+  // レシート取り込み(Phase 3)用の判定パターン。v0.8.0でparseReceipt()を順序対称の
+  // キュー方式に書き直したのに合わせて、ここも「無条件に捨てる行」の判定を1本化した
+  // (旧版は割引行と直後の金額行をセットで消費していたが、新版は割引/売変/レジ袋を含む行と
+  // 割引額そのもの(負の数の行)を別々にノイズ判定するので、隣接している必要がなくなった)。
+  var RECEIPT_NOISE_WORDS = ["★割引", "値引", "売変", "レジ袋"];
   var RECEIPT_CUTOFF_WORDS = ["小計", "合計", "お買上", "PayPay", "楽天ペイ", "※印は", "領収証", "登録番号"];
-  // 金額のみの行(¥・-・·付きや末尾※・内も許容)
-  var RECEIPT_MONEY_RE = /^[¥￥\-·−]?[\d,]+\s*(?:内)?\s*[※]?$/;
+  // 確定金額行: ※・内が付く数字、または¥付きの数字(¥のみは末尾マーカー無しでも確定扱い)
+  var RECEIPT_MONEY_RE = /^(?:[¥￥]\s*[\d,]+\s*(?:内)?|[\d,]+\s*(?:内|※))$/;
+  // 曖昧な数字行: マーカーの付かない数字だけの行(商品コード単独行の可能性もあるので即採用しない)
+  var RECEIPT_AMBIGUOUS_RE = /^[\d,]+$/;
+  // 割引額などの負の数だけの行(例: -35 -50)
+  var RECEIPT_NEGATIVE_RE = /^-[\d,]+$/;
   // 商品名先頭の商品コード(2〜4桁)
   var RECEIPT_CODE_RE = /^\d{2,4}\s*/;
   // 数量注記(例: （@139✕2個） (@99 x 3個))。全角/半角の括弧・✕×xX・空白の揺れを許容
@@ -793,6 +807,8 @@
   // 商品名+金額が同じ行にあるパターン(例: ソフティモ2倍W12R ¥690内)
   var RECEIPT_COMBINED_RE = /^(.+?)\s*[¥￥]\s*([\d,]+)\s*(?:内|※)?\s*$/;
   var RECEIPT_DATE_RE = /\d{4}年\d{1,2}月\d{1,2}日/;
+  // 曖昧な数字行を商品名に割り当てる際の最大許容行距離(これを超えたら「近くに無い」扱い)
+  var RECEIPT_AMBIGUOUS_MAX_DIST = 5;
 
   // ─────────────────────────────────────────
   // ユーティリティ
@@ -1414,68 +1430,122 @@
     return parseInt(String(s).replace(/[¥￥,※\-·−]/g, ""), 10) || 0;
   }
 
+  // ある1行が「無条件に捨てるノイズ行」かどうかを判定する。
+  // ★割引/値引/売変/レジ袋を含む行、割引額そのもの(負の数だけの行)、単価注記(@571等)・
+  // 値段変更の注記(★売変@714→等、→を含む行)、記号だけ・1文字だけの行(はぐれた"5"等)が対象。
+  function isReceiptNoiseLine(line){
+    if (RECEIPT_NOISE_WORDS.some(function(w){ return line.indexOf(w) !== -1; })) return true;
+    if (RECEIPT_NEGATIVE_RE.test(line)) return true;
+    if (line.indexOf("@") === 0 || line.indexOf("→") !== -1) return true;
+    if (line.length === 1) return true;
+    if (!/[0-9A-Za-zぁ-んァ-ヶ一-龠]/.test(line)) return true; // 英数・かな・漢字を含まない=記号だけ
+    return false;
+  }
+
   // レシートのLive Text生テキストを商品候補配列にパースする。
   // 戻り値: { date:"2026年07月27日"(無ければ""), items:[{raw, qty, price}] }
   //
-  // 行の判定順序(1行ずつ):
-  //   1) 割引/値引を含む行 → その行と直後の金額行を両方捨てる
-  //   2) レジ袋を含む行 → その行だけ捨てる
-  //   3) 小計/合計等のキーワードを含む行 → 以降は完全に無視(打ち切り)
-  //   4) 数量注記((@139✕2個)等) → 直前に確定した商品のqtyへ反映
-  //   5) 金額のみの行 → 価格待ちの商品(pending)があれば確定する
-  //   6) 商品名+金額が同じ行(ソフティモ2倍W12R ¥690内 等) → その場で確定
-  //   7) それ以外 → 先頭の商品コードを除去して次の価格待ち商品(pending)にする
-  //      (前のpendingが価格未確定のまま次の商品名行が来た場合は破棄する。
-  //       ヘッダ(maruetsu等)が商品部の途中に紛れても、価格が付かない限り候補に残らない)
+  // v0.8.0で「商品名の行→次の金額行」という順序依存の逐次ペアリングを廃止し、
+  // 分類→FIFO突き合わせの2段方式に書き直した。実機のLive Text出力は写真によって
+  // 商品名と金額の行順が入れ替わったり(金額が先に来る)、商品コードだけの行が単独で
+  // 挟まったりして崩れることがあり、旧方式(直前の行を見るだけ)では対応が丸ごとズレて
+  // 取り込み漏れが発生していたため。
+  //
+  // 段1) 各行を分類する(打ち切りキーワードが出たらそこで処理終了):
+  //   ・ノイズ → 無条件に捨てる(isReceiptNoiseLine。割引/売変/レジ袋/負の数/単価注記/1文字等)
+  //   ・数量注記((@139✕2個)等) → 直前に出てきた商品名(lastNameRef)のqtyへ即反映
+  //   ・確定金額行(※・内・¥付き) → moneyQueueへ
+  //   ・商品名+金額が同じ行(ソフティモ2倍W12R ¥690内 等) → その場で確定してitemsへ
+  //   ・曖昧な数字行(マーカー無しの数字だけ。商品コード単独行の可能性がある) → ambigQueueへ
+  //   ・それ以外 → 先頭の商品コードを除去して商品名としてnameQueue・itemsへ(空になれば捨てる)
+  //
+  // 段2) 商品名キューと確定金額キューをFIFOで突き合わせる。ただし単純に配列の同じ添字同士を
+  //   ペアリングすると、確定金額が付かない商品(★売変などで※が付かないケース。例:
+  //   「ZLフリーザーM」の直後の金額行に※が無い)が1件挟まっただけで以降すべてズレて
+  //   誤対応してしまう。そこで「次の商品名の行より前にある金額まで」という上限を設けて
+  //   1商品につき先頭から1つずつ消費する(名前が先でも金額が先でも吸収される)。
+  //   これでもなお金額が付かなかった商品名には、行位置が最も近い未使用の曖昧数字行を
+  //   割り当てる(上のZLフリーザーMのケースはここで拾う)。近すぎず遠すぎる(5行超)場合は
+  //   金額未確定のまま候補に残し、曖昧数字行の候補が1つも残っていない商品名は取り込み対象
+  //   から外す(コード単独行やヘッダ文字列がここで自然に落ちる。maruetsu等)。
   function parseReceipt(text){
     var lines = String(text || "").split("\n");
-    var items = [];
-    var pending = null;       // { raw } 価格待ちの商品
-    var lastConfirmed = null; // 直前に確定した商品(items内の要素参照。数量注記の反映先)
-
-    function confirm(raw, price){
-      var it = { raw: raw, qty: 1, price: price };
-      items.push(it);
-      lastConfirmed = it;
-      pending = null;
-    }
+    var items = [];       // 出現順の全候補(段2bで価格が付かなかったものは最後にfilterで除く)
+    var nameQueue = [];   // 価格待ちの商品名(itemsと同じオブジェクト参照)
+    var moneyQueue = [];  // 確定金額行 { value, lineIdx }
+    var ambigQueue = [];  // 曖昧な数字行 { value, lineIdx }
+    var lastNameRef = null; // 数量注記の適用先(直前に出た商品名/同一行確定分)
 
     for (var i = 0; i < lines.length; i++){
       var line = lines[i].trim();
       if (!line) continue;
 
-      if (RECEIPT_DISCOUNT_WORDS.some(function(w){ return line.indexOf(w) !== -1; })) {
-        var next = (lines[i + 1] || "").trim();
-        if (RECEIPT_MONEY_RE.test(next)) i++; // 直後の金額行も一緒に消費して捨てる
-        pending = null;
-        continue;
-      }
-      if (RECEIPT_SKIP_WORDS.some(function(w){ return line.indexOf(w) !== -1; })) continue;
-
       if (RECEIPT_CUTOFF_WORDS.some(function(w){ return line.indexOf(w) !== -1; })) break;
+      if (isReceiptNoiseLine(line)) continue;
 
       var qtyMatch = line.match(RECEIPT_QTY_RE);
       if (qtyMatch) {
-        if (lastConfirmed) lastConfirmed.qty = parseInt(qtyMatch[1], 10) || lastConfirmed.qty;
+        if (lastNameRef) lastNameRef.qty = parseInt(qtyMatch[1], 10) || lastNameRef.qty;
         continue;
       }
 
       if (RECEIPT_MONEY_RE.test(line)) {
-        if (pending) confirm(pending.raw, parseReceiptMoney(line));
-        continue; // pendingが無い金額行(はぐれた数量等)は捨てる
+        moneyQueue.push({ value: parseReceiptMoney(line), lineIdx: i });
+        continue;
       }
 
       var combo = line.match(RECEIPT_COMBINED_RE);
       if (combo) {
         var comboName = combo[1].trim().replace(RECEIPT_CODE_RE, "").trim();
-        if (comboName) confirm(comboName, parseReceiptMoney(combo[2]));
+        if (comboName) {
+          var comboItem = { raw: comboName, qty: 1, price: parseReceiptMoney(combo[2]) };
+          items.push(comboItem);
+          lastNameRef = comboItem;
+        }
+        continue;
+      }
+
+      if (RECEIPT_AMBIGUOUS_RE.test(line)) {
+        ambigQueue.push({ value: parseReceiptMoney(line), lineIdx: i });
         continue;
       }
 
       var name = line.replace(RECEIPT_CODE_RE, "").trim();
       if (!name) continue; // コード除去後に残りが空 → 商品行として扱わない
-      pending = { raw: name };
+      var nameItem = { raw: name, qty: 1, price: null, lineIdx: i };
+      items.push(nameItem);
+      nameQueue.push(nameItem);
+      lastNameRef = nameItem;
     }
+
+    // 段2a: 確定金額キューとのFIFO突き合わせ(次の商品名の行を超えて奪わない)
+    var mi = 0;
+    for (var ni = 0; ni < nameQueue.length; ni++){
+      var nm = nameQueue[ni];
+      var nextLine = (ni + 1 < nameQueue.length) ? nameQueue[ni + 1].lineIdx : Infinity;
+      if (mi < moneyQueue.length && moneyQueue[mi].lineIdx < nextLine) {
+        nm.price = moneyQueue[mi].value;
+        mi++;
+      }
+    }
+
+    // 段2b: 金額が付かなかった商品名に、最も近い未使用の曖昧数字行を割り当てる
+    var usedAmbig = {};
+    nameQueue.forEach(function(nm2){
+      if (nm2.price != null) return;
+      var bestIdx = -1, bestDist = Infinity;
+      ambigQueue.forEach(function(a, ai){
+        if (usedAmbig[ai]) return;
+        var d = Math.abs(a.lineIdx - nm2.lineIdx);
+        if (d < bestDist) { bestDist = d; bestIdx = ai; }
+      });
+      if (bestIdx === -1) { nm2.drop = true; return; } // 曖昧候補が1つも残っていない→捨てる
+      usedAmbig[bestIdx] = true;
+      if (bestDist <= RECEIPT_AMBIGUOUS_MAX_DIST) nm2.price = ambigQueue[bestIdx].value;
+      // 距離超過の場合は割り当てずに金額未確定のまま候補に残す(価格はUI上必須ではない)
+    });
+
+    items = items.filter(function(it){ return !it.drop; });
 
     var dateMatch = String(text || "").match(RECEIPT_DATE_RE);
     return { date: dateMatch ? dateMatch[0] : "", items: items };
@@ -1593,6 +1663,27 @@
     S.receiptCandidates = cands;
     S.receiptStep = "candidates";
     render();
+  }
+
+  // ショートカット連携(v0.8.0): iOSショートカットから「写真を撮る→テキスト認識→Safariで
+  // このアプリを#receipt=<テキスト>付きで開く」という流れで、レシート取り込みシートを開いて
+  // 貼り付け・パースまで自動で行う。
+  // クエリ文字列(?receipt=)ではなくハッシュ(#receipt=)を使う理由: ハッシュはブラウザから
+  // サーバーへ送信されないため、GitHub PagesのアクセスログにレシートOCRの中身(購入品目)が
+  // 残らない。またService WorkerのfetchイベントはリクエストURLでキャッシュ照合するが、
+  // ハッシュはリクエストに含まれないためキャッシュ動作にも影響しない。
+  function applyReceiptShortcut(){
+    var hash = location.hash || "";
+    if (hash.indexOf("#receipt=") !== 0) return;
+    var raw = hash.slice("#receipt=".length);
+    // 消費したらすぐハッシュを消す(リロード・再訪問時に同じテキストで再実行されないように)
+    history.replaceState(null, "", location.pathname + location.search);
+    var text;
+    try { text = decodeURIComponent(raw); } catch (e) { return; } // デコード失敗 → 何もしない
+    if (!text.trim()) return; // 空文字 → 何もしない(通常起動のまま)
+    openReceiptSheet();
+    S.receiptText = text;
+    parseReceiptText(); // そのまま「よみとるぞう」まで自動で進めて候補リストを表示する
   }
 
   // ONの候補だけを在庫へ確定する
@@ -3118,6 +3209,7 @@
     loadSyncConfig();
     S.data = loadData();
     render();
+    applyReceiptShortcut(); // データロード後にハッシュを見てレシート取り込みシートを自動オープン
 
     // Phase 2同期: 起動時(設定済みなら)に1回実行する。以後はpersist()経由のデバウンス自動同期・
     // visibilitychangeでのフォアグラウンド復帰・設定シートの「今すぐ同期」で実行する。
