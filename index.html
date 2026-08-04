@@ -15,7 +15,10 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <style>
   /* ===================================================================
-     あるぞう Phase 1〜4 (v0.8.0)
+     あるぞう Phase 1〜4 (v0.8.1)
+     v0.8.1: ショートカット連携がSafariのタブ再利用時に動かない不具合を修正。同じURLのタブが
+     使い回されるとページが再読み込みされず起動時のハッシュチェックが走らないため、
+     hashchangeイベントでもapplyReceiptShortcut()を実行するようにした。
      冷蔵庫・日用品・リュクサク(ペット)用品の在庫を絵文字で管理するPWA。
      v0.8.0: レシートパーサ(parseReceipt)を全面書き直し。junの実機で「大根」「こくうまキムチ」等が
        取り込み漏れした件の原因調査で、Live Textの行順が写真によって崩れる(金額が商品名より先に
@@ -643,7 +646,7 @@
   var STORAGE_KEY = "aruzou-v1";
   // 配布した版がjunの端末に反映されているか確認するための表示用バージョン。ここを更新すると
   // 設定シート最下部の表示も連動する(index.html冒頭のバージョンコメントと値を一致させること)。
-  var APP_VERSION = "0.8.0";
+  var APP_VERSION = "0.8.1";
 
   var CAT_LABELS = { fridge:"冷蔵庫", daily:"日用品", pet:"リュクサク" };
   var DEPTS = {
@@ -3210,6 +3213,9 @@
     S.data = loadData();
     render();
     applyReceiptShortcut(); // データロード後にハッシュを見てレシート取り込みシートを自動オープン
+    // Safariが「同じURLのタブを使い回してハッシュだけ変える」場合はページが再読み込みされず
+    // 上の起動時チェックが走らない(ショートカット2回目以降で必ず起きる)。hashchangeでも拾う。
+    window.addEventListener("hashchange", applyReceiptShortcut);
 
     // Phase 2同期: 起動時(設定済みなら)に1回実行する。以後はpersist()経由のデバウンス自動同期・
     // visibilitychangeでのフォアグラウンド復帰・設定シートの「今すぐ同期」で実行する。
